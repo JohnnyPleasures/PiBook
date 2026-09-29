@@ -1,154 +1,129 @@
 # PiBook
 
-PiBook is an experimental Raspberry Pi Zero W e-reader built around a
-Waveshare 7.5-inch V2 e-paper display.
+PiBook is a DIY e-reader built around a Raspberry Pi Zero W and a 7.5-inch Waveshare e-paper display.
 
-This repository is an actively developed fork of the original
-`rolohaun/PiBook` project. It contains substantial hardware, software,
-networking, power-management and boot-time changes developed for the current
-PiBook prototype.
+This repository is an actively developed fork of the original `rolohaun/PiBook` project, adapted and expanded for a custom PiBook prototype with a strong focus on e-paper reading, battery operation, local connectivity and a lightweight interface suitable for the Raspberry Pi Zero.
 
-## Current hardware baseline
+The project is functional and usable, but development is still ongoing.
+
+## Hardware
+
+The current PiBook prototype uses:
 
 - Raspberry Pi Zero W 1.1
 - Waveshare 7.5-inch e-Paper V2
 - Waveshare UPS HAT C
 - LiPo battery around 4000 mAh
-- Raspberry Pi OS / Raspbian 13 (Trixie)
-- ARMv6
+- microSD storage
+- physical GPIO buttons
 
-The validated system state is documented in `docs/SYSTEM_BASELINE.md`.
+The current software baseline is Raspberry Pi OS / Raspbian 13 (Trixie) on ARMv6.
 
-## Current features
+## Features
 
-- EPUB reading and persistent reading progress
-- physical-button navigation
-- partial and full e-paper refresh management
+PiBook currently includes:
+
+- EPUB reading
+- persistent reading progress
+- e-paper optimised navigation
+- partial and full display refresh
+- physical button controls
+- book library management
 - local web interface
-- Wi-Fi and hotspot management
-- captive portal
-- IP/network scanner
-- remote controls and terminal tools
-- battery monitoring and safety shutdown
-- battery-cycle logging
+- remote navigation and controls
+- Wi-Fi management
+- hotspot mode and captive portal
+- network/IP scanner
+- battery monitoring
+- low-battery protection and safe shutdown
+- battery cycle logging
 - configurable power profiles
-- boot guard and boot diagnostics
+- boot diagnostics and recovery mechanisms
 - early e-paper boot splash
-
-PiBook is still under active development and should not yet be considered a
-final consumer-ready release.
 
 ## Installation
 
-The supported installation entry point is:
+The current installation entry point is:
 
 `sudo ./scripts/install/install.sh`
 
-The installation is split into:
+The installer prepares the required system packages, Python environment, Waveshare display driver and PiBook system integration.
 
-- `scripts/install/install-packages.sh`
-- `scripts/install/install-waveshare.sh`
-- `scripts/install/install-system.sh`
-- `scripts/install/install-early-splash.sh`
-- `scripts/install/install.sh`
+The current installation baseline assumes the `pi` user and the project located at:
 
-The current reproducible baseline deliberately assumes:
+`/home/pi/PiBook`
 
-- user: `pi`
-- project: `/home/pi/PiBook`
+Support for arbitrary users and installation paths is planned for a future revision.
 
-Support for arbitrary users and installation paths is future work.
+### Local configuration
 
-## Python environment
+Personal configuration is not included in the repository.
 
-The Raspberry Pi Zero W baseline uses Debian / Raspberry Pi OS Python packages
-inside a virtual environment created with `--system-site-packages`.
+After installation, local Wi-Fi settings must be configured on the device and books must be added by the user.
 
-`requirements.txt` is therefore a Python dependency reference. It is not the
-supported installation method for the Pi Zero W baseline.
+Example network configuration files are available under:
 
-Optional or legacy backends are listed separately in
-`requirements-optional.txt`.
+`system/network/`
 
-## Waveshare driver
+## Waveshare e-paper support
 
-The large Waveshare upstream repository is not included directly in this
-repository.
+PiBook uses the official Waveshare e-paper driver with a small project-specific patch.
 
-The installer retrieves the exact upstream revision recorded in
-`patches/waveshare/VENDOR_COMMIT` and applies the PiBook patch
-`patches/waveshare/epdconfig-spi-descriptor-reuse.patch`.
+The exact upstream driver revision and patch are stored under:
 
-The patch reuses the SPI descriptor across display reinitialisation to avoid
-repeated `/dev/spidev0.0` opens.
+`patches/waveshare/`
 
-## Network configuration
+The complete Waveshare repository is downloaded during installation rather than stored directly in this repository.
 
-Real Wi-Fi credentials and NetworkManager identifiers are never stored in Git.
+## Early boot splash
 
-Public configuration sources are under `system/network/`.
+PiBook can display an e-paper splash screen during the early Linux boot process.
 
-A new installation must create local
-`/etc/pibook-network/config.json` and
-`/etc/pibook-network/startup.json` from the supplied examples before network
-startup/watchdog behaviour can be fully enabled.
+The splash is built from the source files under:
 
-## Early e-paper splash
+`system/initramfs/early-splash/`
 
-The early splash is built from source.
+Building the splash creates a separate initramfs candidate and does not automatically replace the active boot image.
 
-The validated design inserts a small `newc` CPIO overlay immediately before
-the normal initramfs ZSTD stream, leaving the original compressed stream
-unchanged.
+## Documentation
 
-The early-splash helper is reproducible byte-for-byte from the versioned C
-source for the validated baseline.
+More detailed technical information is available in:
 
-Running `./scripts/install/install-early-splash.sh build` creates
-`build/early-splash/initramfs-pibook-candidate`.
+- `docs/SYSTEM_BASELINE.md` — current validated hardware and system baseline
+- `docs/DEVELOPMENT_HISTORY.md` — reconstructed development history before this fork began using regular Git commits
+- `docs/POWER_OPTIMIZATION_LEGACY.md` — retained notes from earlier power-management experiments
+- `system/network/README.md` — network configuration and architecture
+- `patches/waveshare/README.md` — Waveshare driver patch information
 
-It does not replace the active boot initramfs. Promotion and boot testing are
-intentionally separate manual operations.
+## Project status
 
-## Runtime data
+PiBook is still under active development.
 
-Personal and generated runtime data is excluded from Git, including books,
-logs, backups, diagnostics, build output, reading progress, battery state,
-local settings, Wi-Fi credentials and NetworkManager profile identifiers.
+Current areas of work include:
 
-Required empty directories are retained using `.gitkeep` files.
+- redesigned and more consistent e-paper interface
+- further battery and power optimisation
+- battery percentage calibration using real charge/discharge cycle data
+- improved boot performance
+- enclosure / physical design v2
+- hardware improvement experiments
+- improved outdoor e-paper readability
+- general code and architecture cleanup
 
-## Development history
+## Development
 
-This fork was developed for a significant period before its Git history was
-prepared for publication.
+The first commit in this fork represents the validated development baseline that existed before the project was prepared for publication.
 
-Rather than creating artificial retroactive commits for experiments, reverts
-and intermediate states, the reconstructed development history is documented
-in `docs/DEVELOPMENT_HISTORY.md`.
+From that point onward, development uses normal incremental Git commits.
 
-The first fork commit represents the current validated development baseline.
-Future development should use normal incremental commits.
-
-## Current development priorities
-
-Planned work includes:
-
-- e-paper interface v2
-- measured battery and power optimisation
-- battery-curve calibration from real cycle logs
-- UPS HAT physical-button consumption measurement
-- enclosure / physical structure v2
-- hardware improvement analysis
-- outdoor e-paper readability testing
-- further boot optimisation
-- code and architecture cleanup
+Generated files, local settings and personal data are intentionally kept outside the repository.
 
 ## Original project and licence
 
-This project is based on the original `rolohaun/PiBook` project.
+PiBook is based on the original `rolohaun/PiBook` project.
 
-The original repository README states that the project is distributed under
-the MIT License. The original revision used as the base of this fork did not
-contain a standalone `LICENSE` file, so this repository preserves the original
-attribution and licence statement rather than inventing copyright metadata.
+The original project states that it is distributed under the MIT License. This fork preserves the original project attribution and licence statement.
+
+Original project:
+
+`https://github.com/rolohaun/PiBook`
