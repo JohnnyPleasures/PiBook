@@ -1,0 +1,16 @@
+[Unit]
+Description=PiBook external Wi-Fi connection attempt
+After=NetworkManager.service
+ConditionPathExists=/etc/pibook-network/config.json
+ConditionPathExists=/usr/local/sbin/pibook-wifi-connectctl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pibook-wifi-connectctl worker
+TimeoutStartSec=220
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

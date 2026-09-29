@@ -1,0 +1,15 @@
+[Unit]
+Description=PiBook temporary Wi-Fi scan and hotspot restore
+After=NetworkManager.service
+ConditionPathExists=/etc/pibook-network/config.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pibook-wifi-scanctl worker
+TimeoutStartSec=150
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

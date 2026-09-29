@@ -1,0 +1,116 @@
+#!/bin/sh
+set -e
+
+OFFICIAL=/usr/lib/rpi-swap/bin/rpi-resize-swap-file
+SWAPFILE=/var/swap
+STATE_DIR=/var/lib/pibook
+STATE_FILE="$STATE_DIR/swap-guard.state"
+
+fingerprint() {
+    {
+        # Ficheiros persistentes:
+        # metadata deteta alterações normais sem calcular hashes completos.
+        for f in \
+            /etc/rpi/swap.conf \
+            /etc/rpi/swap.conf.d/*.conf \
+            /usr/local/lib/rpi/swap.conf.d/*.conf \
+            /usr/lib/rpi/swap.conf.d/*.conf \
+            /usr/lib/rpi-swap/bin/rpi-resize-swap-file \
+            /usr/lib/rpi-swap/bin/rpi-desired-swap-size \
+            /usr/lib/systemd/system-generators/rpi-swap-generator
+        do
+            if [ -f "$f" ]; then
+                stat -c 'FILE|%n|%s|%Y|%Z' "$f"
+            fi
+        done
+
+        # Diretórios persistentes:
+        # permite detetar criação/remoção de drop-ins.
+        for d in \
+            /etc/rpi/swap.conf.d \
+            /usr/local/lib/rpi/swap.conf.d \
+            /usr/lib/rpi/swap.conf.d
+        do
+            if [ -d "$d" ]; then
+                stat -c 'DIR|%n|%Y|%Z' "$d"
+            fi
+        done
+
+        # rpi-systemd-config pode mudar numa atualização.
+        RSC="$(command -v rpi-systemd-config 2>/dev/null || true)"
+        if [ -n "$RSC" ] && [ -f "$RSC" ]; then
+            stat -c 'FILE|%n|%s|%Y|%Z' "$RSC"
+        fi
+
+        # /run é recriado a cada boot:
+        # não usar mtime. Se existirem overrides runtime,
+        # usamos o conteúdo para evitar falsos positivos.
+        for f in /run/rpi/swap.conf.d/*.conf
+        do
+            if [ -f "$f" ]; then
+                printf 'RUNTIME|%s|' "$f"
+                sha256sum "$f" | awk '{print $1}'
+            fi
+        done
+    } | sha256sum | awk '{print $1}'
+}
+
+write_state() {
+    FP="$1"
+
+    if [ ! -f "$SWAPFILE" ]; then
+        return 1
+    fi
+
+    TYPE="$(blkid -p -s TYPE -o value "$SWAPFILE" 2>/dev/null || true)"
+
+    if [ "$TYPE" != "swap" ]; then
+        return 1
+    fi
+
+    BYTES="$(stat -c %s "$SWAPFILE")"
+
+    mkdir -p "$STATE_DIR"
+
+    {
+        echo "FINGERPRINT=$FP"
+        echo "EXPECTED_BYTES=$BYTES"
+    } > "$STATE_FILE"
+
+    chmod 600 "$STATE_FILE"
+}
+
+# Prime manual para um estado que já foi previamente validado.
+if [ "${1:-}" = "--prime" ]; then
+    FP="$(fingerprint)"
+    write_state "$FP"
+    echo "PiBook swap guard v3: state primed."
+    exit 0
+fi
+
+CURRENT_FP="$(fingerprint)"
+
+FINGERPRINT=
+EXPECTED_BYTES=
+
+if [ -f "$STATE_FILE" ]; then
+    . "$STATE_FILE"
+fi
+
+if [ "$FINGERPRINT" = "$CURRENT_FP" ] &&
+   [ -n "$EXPECTED_BYTES" ] &&
+   [ "$EXPECTED_BYTES" -gt 0 ] 2>/dev/null &&
+   [ -f "$SWAPFILE" ] &&
+   [ "$(stat -c %s "$SWAPFILE")" -eq "$EXPECTED_BYTES" ] &&
+   [ "$(blkid -p -s TYPE -o value "$SWAPFILE" 2>/dev/null || true)" = "swap" ]; then
+
+    echo "PiBook swap guard v3: valid cached swapfile (${EXPECTED_BYTES} bytes); skipping maintenance."
+    exit 0
+fi
+
+echo 'PiBook swap guard v3: swap/config state changed; running official rpi-resize-swap-file.'
+
+"$OFFICIAL"
+
+NEW_FP="$(fingerprint)"
+write_state "$NEW_FP"

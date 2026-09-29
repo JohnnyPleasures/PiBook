@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+CONFIG_PATH = Path("/etc/pibook-network/startup.json")
+RESULT_PATH = Path("/var/lib/pibook-network/startup_result.json")
+STATE_PATH = Path("/var/lib/pibook-network/state.json")
+LOCK_PATH = Path("/run/pibook-network/startup.lock")
+NETWORKCTL = "/usr/local/sbin/pibook-networkctl"
+CONNECTCTL = "/usr/local/sbin/pibook-wifi-connectctl"
+
+
+def now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def log(message: str) -> None:
+    print(f"{now()} {message}", flush=True)
+
+
+def run(
+    args: list[str],
+    *,
+    timeout: int,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    log("EXEC: " + " ".join(args))
+    result = subprocess.run(
+        args,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+    if result.stdout.strip():
+        log("STDOUT: " + result.stdout.strip())
+    if result.stderr.strip():
+        log("STDERR: " + result.stderr.strip())
+
+    if check and result.returncode != 0:
+        raise RuntimeError(
+            f"Comando falhou ({result.returncode}): {' '.join(args)}"
+        )
+
+    return result
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def validate_configuration() -> int:
+    config = load_json(CONFIG_PATH)
+    required = {
+        "default_mode",
+        "fallback_wifi_uuid",
+        "fallback_wifi_name",
+        "platform_timeout_seconds",
+        "hotspot_attempts",
+    }
+    missing = sorted(required.difference(config))
+    if missing:
+        raise RuntimeError(
+            "Configuração incompleta: " + ", ".join(missing)
+        )
+
+    if config["default_mode"] != "hotspot":
+        raise RuntimeError("O modo padrão tem de ser hotspot.")
+
+    fallback_uuid = str(config["fallback_wifi_uuid"])
+    fallback_name = str(config["fallback_wifi_name"])
+    platform_timeout = int(config["platform_timeout_seconds"])
+    hotspot_attempts = int(config["hotspot_attempts"])
+
+    if not fallback_uuid or not fallback_name:
+        raise RuntimeError("O perfil Wi-Fi de fallback está incompleto.")
+    if platform_timeout < 30:
+        raise RuntimeError("O timeout da plataforma é demasiado curto.")
+    if hotspot_attempts < 1:
+        raise RuntimeError("Tem de existir pelo menos uma tentativa de hotspot.")
+
+    for executable in (NETWORKCTL, CONNECTCTL):
+        if not os.path.isfile(executable) or not os.access(
+            executable, os.X_OK
+        ):
+            raise RuntimeError(f"Executável indisponível: {executable}")
+
+    profile = subprocess.run(
+        [
+            "nmcli",
+            "-g",
+            "connection.uuid",
+            "connection",
+            "show",
+            "uuid",
+            fallback_uuid,
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if profile.returncode != 0 or profile.stdout.strip() != fallback_uuid:
+        raise RuntimeError(
+            "O perfil Wi-Fi de fallback não está disponível no "
+            "NetworkManager."
+        )
+
+    self_check = run(
+        [NETWORKCTL, "self-check"],
+        timeout=60,
+        check=False,
+    )
+    if self_check.returncode != 0:
+        raise RuntimeError("O self-check do backend de rede falhou.")
+
+    payload = {
+        "status": "ok",
+        "default_mode": "hotspot",
+        "fallback_wifi_uuid": fallback_uuid,
+        "fallback_wifi_name": fallback_name,
+        "platform_timeout_seconds": platform_timeout,
+        "hotspot_attempts": hotspot_attempts,
+        "network_backend_self_check": "ok",
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def write_result(
+    *,
+    status: str,
+    mode: str,
+    message: str,
+    errors: list[str],
+    fallback_uuid: str,
+    fallback_name: str,
+) -> None:
+    RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "status": status,
+        "mode": mode,
+        "message": message,
+        "errors": errors,
+        "fallback_wifi_uuid": fallback_uuid,
+        "fallback_wifi_name": fallback_name,
+        "completed_at": now(),
+        "boot_id": Path("/proc/sys/kernel/random/boot_id")
+        .read_text(encoding="utf-8")
+        .strip(),
+    }
+
+    temporary = RESULT_PATH.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, RESULT_PATH)
+
+
+def wait_for_platform(timeout_seconds: int) -> None:
+    """Wait only for the Wi-Fi interface needed by direct hotspot mode."""
+    deadline = time.monotonic() + timeout_seconds
+    last_error = ""
+
+    while time.monotonic() < deadline:
+        wlan = Path("/sys/class/net/wlan0").exists()
+
+        if wlan:
+            probe = subprocess.run(
+                ["ip", "link", "show", "dev", "wlan0"],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            if probe.returncode == 0:
+                log("wlan0 disponível para hotspot direto.")
+                return
+
+            last_error = (
+                "wlan0 existe, mas ainda não responde a ip link: "
+                + (probe.stderr.strip() or f"rc={probe.returncode}")
+            )
+        else:
+            last_error = "wlan0 ainda não existe"
+
+        time.sleep(1)
+
+    raise RuntimeError(
+        "A plataforma Wi-Fi não ficou pronta: " + last_error
+    )
+
+
+def status_payload() -> dict[str, Any]:
+    result = run(
+        [NETWORKCTL, "status", "--json"],
+        timeout=40,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def validate_hotspot(
+    actual: dict[str, Any],
+) -> tuple[bool, str]:
+    """Validate the final hotspot result without re-querying the network.
+
+    `pibook-networkctl hotspot` only returns after its own final
+    actual_status() validation has succeeded. Here we additionally confirm
+    the persisted idle state and captive portal.
+    """
+    try:
+        state = load_json(STATE_PATH)
+    except Exception as exc:
+        return False, f"Não foi possível ler o estado persistido: {exc}"
+
+    addresses = actual.get("addresses", [])
+
+    if isinstance(addresses, str):
+        addresses = [addresses]
+
+    checks = {
+        "mode": actual.get("mode") == "hotspot",
+        "operation": state.get("operation") == "idle",
+        "address": "10.42.0.1/24" in addresses,
+        "hostapd": actual.get("hostapd_active") is True,
+        "dnsmasq": actual.get("dnsmasq_active") is True,
+        "captive": subprocess.run(
+            [
+                "systemctl",
+                "is-active",
+                "--quiet",
+                "pibook-network-captive.service",
+            ],
+            check=False,
+        ).returncode == 0,
+    }
+
+    failed = [name for name, value in checks.items() if not value]
+
+    if failed:
+        return False, "Validações em falta: " + ", ".join(failed)
+
+    return True, "Hotspot PiBook operacional."
+
+
+def validate_wifi(expected_uuid: str) -> tuple[bool, str]:
+    try:
+        payload = status_payload()
+    except Exception as exc:
+        return False, f"Não foi possível ler o estado: {exc}"
+
+    actual = payload.get("actual", {})
+    state = payload.get("state", {})
+    addresses = actual.get("addresses", [])
+
+    if isinstance(addresses, str):
+        addresses = [addresses]
+
+    has_ipv4 = any(
+        isinstance(item, str)
+        and "." in item
+        and not item.startswith("10.42.0.")
+        for item in addresses
+    )
+
+    checks = {
+        "mode": actual.get("mode") == "wifi",
+        "operation": state.get("operation") == "idle",
+        "uuid": actual.get("wifi_uuid") == expected_uuid,
+        "address": has_ipv4,
+    }
+
+    failed = [name for name, value in checks.items() if not value]
+
+    if failed:
+        return False, "Validações em falta: " + ", ".join(failed)
+
+    return True, "Wi-Fi de fallback operacional."
+
+
+def main() -> int:
+    if len(sys.argv) == 2 and sys.argv[1] == "--validate-only":
+        try:
+            return validate_configuration()
+        except Exception as exc:
+            print(f"ERRO: {exc}", file=sys.stderr, flush=True)
+            return 1
+
+    if len(sys.argv) != 1:
+        print(
+            "Uso: pibook-network-startup [--validate-only]",
+            file=sys.stderr,
+        )
+        return 2
+
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    with LOCK_PATH.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        config = load_json(CONFIG_PATH)
+        fallback_uuid = str(config["fallback_wifi_uuid"])
+        fallback_name = str(config["fallback_wifi_name"])
+        platform_timeout = int(config.get("platform_timeout_seconds", 150))
+        hotspot_attempts = int(config.get("hotspot_attempts", 2))
+        errors: list[str] = []
+
+        log("PiBook: início do coordenador de rede.")
+        log(f"Modo padrão: hotspot; fallback: {fallback_name}")
+
+        try:
+            wait_for_platform(platform_timeout)
+        except Exception as exc:
+            message = str(exc)
+            errors.append(message)
+            write_result(
+                status="failed",
+                mode="none",
+                message=message,
+                errors=errors,
+                fallback_uuid=fallback_uuid,
+                fallback_name=fallback_name,
+            )
+            log("ERRO: " + message)
+            return 1
+
+        for unit in (
+            "pibook-wifi-scan.service",
+            "pibook-wifi-connect.service",
+        ):
+            subprocess.run(
+                ["systemctl", "reset-failed", unit],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        for attempt in range(1, hotspot_attempts + 1):
+            log(
+                f"Tentativa {attempt}/{hotspot_attempts} "
+                "de ativação do hotspot."
+            )
+
+            try:
+                result = run(
+                    [NETWORKCTL, "hotspot"],
+                    timeout=120,
+                    check=False,
+                )
+
+                if result.returncode != 0:
+                    errors.append(
+                        f"hotspot tentativa {attempt}: "
+                        f"código {result.returncode}"
+                    )
+                else:
+                    actual = json.loads(result.stdout)
+                    valid, message = validate_hotspot(actual)
+
+                    if valid:
+                        write_result(
+                            status="success",
+                            mode="hotspot",
+                            message=message,
+                            errors=errors,
+                            fallback_uuid=fallback_uuid,
+                            fallback_name=fallback_name,
+                        )
+                        log("SUCESSO: " + message)
+                        return 0
+
+                    errors.append(
+                        f"hotspot tentativa {attempt}: {message}"
+                    )
+            except subprocess.TimeoutExpired:
+                errors.append(
+                    f"hotspot tentativa {attempt}: timeout de 120 s"
+                )
+            except Exception as exc:
+                errors.append(
+                    f"hotspot tentativa {attempt}: {exc}"
+                )
+
+            time.sleep(5)
+
+        log("Hotspot indisponível; a iniciar fallback Wi-Fi.")
+
+        try:
+            result = run(
+                [NETWORKCTL, "wifi", fallback_uuid],
+                timeout=180,
+                check=False,
+            )
+
+            if result.returncode != 0:
+                errors.append(
+                    "fallback Wi-Fi: "
+                    f"código {result.returncode}"
+                )
+            else:
+                time.sleep(6)
+                valid, message = validate_wifi(fallback_uuid)
+
+                if valid:
+                    subprocess.run(
+                        ["systemctl", "restart", "avahi-daemon.service"],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    write_result(
+                        status="fallback",
+                        mode="wifi",
+                        message=message,
+                        errors=errors,
+                        fallback_uuid=fallback_uuid,
+                        fallback_name=fallback_name,
+                    )
+                    log("FALLBACK: " + message)
+                    return 0
+
+                errors.append("fallback Wi-Fi: " + message)
+        except subprocess.TimeoutExpired:
+            errors.append("fallback Wi-Fi: timeout de 180 s")
+        except Exception as exc:
+            errors.append("fallback Wi-Fi: " + str(exc))
+
+        message = "Falharam o hotspot e o Wi-Fi de fallback."
+        write_result(
+            status="failed",
+            mode="none",
+            message=message,
+            errors=errors,
+            fallback_uuid=fallback_uuid,
+            fallback_name=fallback_name,
+        )
+        log("ERRO: " + message)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

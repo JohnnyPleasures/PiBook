@@ -1,0 +1,16 @@
+[Unit]
+Description=PiBook WPA2 hotspot (hostapd)
+After=systemd-udev-settle.service
+ConditionPathExists=/etc/pibook-network/hostapd.conf
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/install -d -o root -g root -m 755 /run/pibook-network/hostapd
+ExecStart=/usr/sbin/hostapd /etc/pibook-network/hostapd.conf
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

@@ -1,38 +1,390 @@
-<h2>💻 Terminal</h2>
-<p style="color: #666; margin-bottom: 24px;">Execute shell commands on your PiBook</p>
+<div class="terminal-v2">
+    <div class="terminal-v2-header">
+        <div>
+            <h2>💻 Terminal</h2>
+            <p>Executa comandos diretamente no PiBook.</p>
+        </div>
 
-<!-- Quick Commands -->
-<div style="margin-bottom: 24px;">
-    <label style="font-weight: 600; margin-bottom: 12px; display: block;">Quick Commands:</label>
-    <div class="controls">
-        <button class="btn btn-secondary" onclick="setCommand('git status')">git status</button>
-        <button class="btn btn-secondary" onclick="setCommand('git pull')">git pull</button>
-        <button class="btn btn-secondary" onclick="setCommand('ls -la')">ls -la</button>
-        <button class="btn btn-secondary" onclick="setCommand('df -h')">df -h (disk)</button>
-        <button class="btn btn-secondary" onclick="setCommand('free -h')">free -h (memory)</button>
-        <button class="btn btn-secondary" onclick="setCommand('sudo systemctl restart pibook')">restart pibook</button>
+        <div id="terminal-state" class="terminal-state terminal-state-idle">
+            Pronto
+        </div>
     </div>
+
+    <div class="terminal-info">
+        <strong>pi@pibook:~/PiBook</strong>
+        <span>Terminal não-interativo · sem limite fixo de duração</span>
+    </div>
+
+    <section class="terminal-section">
+        <div class="terminal-section-title">Atalhos</div>
+
+        <div class="terminal-quick">
+            <button type="button" class="btn btn-secondary"
+                    data-command="systemctl status pibook-zero.service --no-pager -l"
+                    onclick="setCommand(this.dataset.command)">
+                Estado PiBook
+            </button>
+
+            <button type="button" class="btn btn-secondary"
+                    data-command="journalctl -u pibook-zero.service -n 100 --no-pager"
+                    onclick="setCommand(this.dataset.command)">
+                Logs PiBook
+            </button>
+
+            <button type="button" class="btn btn-secondary"
+                    data-command="ip -br addr; echo; nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status"
+                    onclick="setCommand(this.dataset.command)">
+                Rede
+            </button>
+
+            <button type="button" class="btn btn-secondary"
+                    data-command="systemctl status pibook-network-watchdog.timer --no-pager; echo; journalctl -u pibook-network-watchdog.service -n 80 --no-pager"
+                    onclick="setCommand(this.dataset.command)">
+                Watchdog
+            </button>
+
+            <button type="button" class="btn btn-secondary"
+                    data-command="df -h /"
+                    onclick="setCommand(this.dataset.command)">
+                Disco
+            </button>
+
+            <button type="button" class="btn btn-secondary"
+                    data-command="free -h"
+                    onclick="setCommand(this.dataset.command)">
+                Memória
+            </button>
+
+            <button type="button" class="btn btn-secondary"
+                    data-command="/home/pi/PiBook/scripts/test_buttons.sh"
+                    onclick="setCommand(this.dataset.command)">
+                Testar botões
+            </button>
+
+            <button type="button" class="btn terminal-restart-btn"
+                    data-command="sudo systemctl restart pibook-zero.service"
+                    onclick="setCommand(this.dataset.command)">
+                Reiniciar PiBook
+            </button>
+        </div>
+    </section>
+
+    <section class="terminal-section">
+        <div class="terminal-section-head">
+            <div class="terminal-section-title">Comando</div>
+
+            <div class="terminal-history-wrap">
+                <select id="terminal-history" aria-label="Histórico de comandos">
+                    <option value="">Histórico</option>
+                </select>
+
+                <button type="button"
+                        class="terminal-mini-btn"
+                        onclick="clearTerminalHistory()">
+                    Apagar
+                </button>
+            </div>
+        </div>
+
+        <textarea id="terminal-input"
+                  rows="7"
+                  spellcheck="false"
+                  autocapitalize="off"
+                  autocomplete="off"
+                  autocorrect="off"
+                  placeholder="Cola aqui um comando ou um bloco com várias linhas..."></textarea>
+
+        <div class="terminal-command-actions">
+            <button type="button"
+                    id="terminal-execute"
+                    class="btn terminal-execute-btn"
+                    onclick="executeCommand()">
+                Executar
+            </button>
+
+            <button type="button"
+                    id="terminal-stop"
+                    class="btn btn-secondary terminal-stop-btn"
+                    onclick="stopTerminalCommand()"
+                    disabled>
+                Parar
+            </button>
+        </div>
+
+        <div class="terminal-hint">
+            No PC: <strong>Ctrl+Enter</strong> executa. Enter normal cria uma nova linha.
+        </div>
+    </section>
+
+    <section class="terminal-section">
+        <div class="terminal-section-head">
+            <div class="terminal-section-title">Output</div>
+
+            <div class="terminal-output-actions">
+                <button type="button"
+                        class="terminal-mini-btn"
+                        onclick="copyOutput()">
+                    Copiar
+                </button>
+
+                <button type="button"
+                        class="terminal-mini-btn"
+                        onclick="clearTerminal()">
+                    Limpar
+                </button>
+            </div>
+        </div>
+
+        <pre id="terminal-output" aria-live="polite">PiBook Terminal v2
+Pronto para executar comandos.
+</pre>
+    </section>
 </div>
 
-<!-- Terminal Output -->
-<div style="margin-bottom: 24px;">
-    <label style="font-weight: 600; margin-bottom: 12px; display: block;">Output:</label>
-    <div id="terminal-output"><span style="color: #4CAF50;">Welcome to PiBook Terminal</span>
-        <span style="color: #888;">Type a command below and click Execute, or use Quick Commands</span>
-    </div>
-    <div style="margin-top: 12px; display: flex; gap: 12px;">
-        <button class="btn btn-secondary" onclick="clearTerminal()" style="flex: 1;">Clear Output</button>
-        <button class="btn btn-secondary" onclick="copyOutput()" style="flex: 1;">Copy Output</button>
-    </div>
-</div>
+<style>
+.terminal-v2 {
+    width: 100%;
+    max-width: 1100px;
+    margin: 0 auto;
+}
 
-<!-- Command Input -->
-<div>
-    <label for="terminal-input" style="font-weight: 600; margin-bottom: 12px; display: block;">Command:</label>
-    <div style="display: flex; gap: 12px;">
-        <input type="text" id="terminal-input" placeholder="Enter command (e.g., ls -la, git status, pwd)"
-            style="flex: 1; padding: 12px; font-family: 'Courier New', monospace; font-size: 14px; border: 2px solid #e0e0e0; border-radius: 6px;">
-        <button class="btn" onclick="executeCommand()" style="width: 120px;">Execute</button>
-    </div>
-    <p class="help-text">⚠️ Commands run in /home/pi/PiBook directory with 30s timeout</p>
-</div>
+.terminal-v2-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+}
+
+.terminal-v2-header h2 {
+    margin: 0 0 5px 0;
+}
+
+.terminal-v2-header p {
+    margin: 0;
+    color: #666;
+}
+
+.terminal-state {
+    flex: 0 0 auto;
+    padding: 7px 11px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.terminal-state-idle {
+    background: #eceff1;
+    color: #455a64;
+}
+
+.terminal-state-running {
+    background: #fff3cd;
+    color: #6d5200;
+}
+
+.terminal-state-ok {
+    background: #dff4e4;
+    color: #215b2e;
+}
+
+.terminal-state-error {
+    background: #fde1e1;
+    color: #8b1e1e;
+}
+
+.terminal-info {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px 18px;
+    margin-bottom: 18px;
+    padding: 11px 13px;
+    border-radius: 8px;
+    background: #f5f6f7;
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.terminal-section {
+    margin-bottom: 22px;
+}
+
+.terminal-section-title {
+    font-weight: 700;
+    margin-bottom: 9px;
+}
+
+.terminal-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 9px;
+}
+
+.terminal-section-head .terminal-section-title {
+    margin-bottom: 0;
+}
+
+.terminal-quick {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.terminal-quick button {
+    width: 100%;
+    min-height: 42px;
+}
+
+.terminal-restart-btn {
+    font-weight: 700;
+}
+
+#terminal-input {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 145px;
+    padding: 13px;
+    border: 2px solid #d7dce0;
+    border-radius: 8px;
+    background: #fff;
+    font-family: "Courier New", Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+#terminal-input:focus {
+    outline: none;
+    border-color: #777;
+}
+
+.terminal-command-actions {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.terminal-command-actions button {
+    min-height: 46px;
+}
+
+.terminal-stop-btn:disabled {
+    opacity: .45;
+    cursor: default;
+}
+
+.terminal-hint {
+    margin-top: 7px;
+    color: #777;
+    font-size: 12px;
+}
+
+.terminal-history-wrap,
+.terminal-output-actions {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+#terminal-history {
+    max-width: 270px;
+    padding: 7px 9px;
+    border: 1px solid #d7dce0;
+    border-radius: 6px;
+    background: white;
+    font-size: 13px;
+}
+
+.terminal-mini-btn {
+    border: 1px solid #d7dce0;
+    border-radius: 6px;
+    background: #fff;
+    padding: 7px 10px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+#terminal-output {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 390px;
+    max-height: 62vh;
+    overflow: auto;
+    margin: 0;
+    padding: 15px;
+    border-radius: 8px;
+    background: #17191b;
+    color: #e0e0e0;
+    font-family: "Courier New", Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.48;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 4;
+}
+
+@media (max-width: 800px) {
+    .terminal-quick {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #terminal-output {
+        min-height: 330px;
+        max-height: 55vh;
+    }
+}
+
+@media (max-width: 560px) {
+    .terminal-v2-header {
+        align-items: center;
+    }
+
+    .terminal-state {
+        font-size: 12px;
+    }
+
+    .terminal-info {
+        display: block;
+    }
+
+    .terminal-info span {
+        display: block;
+        margin-top: 5px;
+    }
+
+    .terminal-section-head {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .terminal-history-wrap,
+    .terminal-output-actions {
+        width: 100%;
+    }
+
+    #terminal-history {
+        flex: 1;
+        max-width: none;
+        min-width: 0;
+    }
+
+    .terminal-output-actions {
+        justify-content: flex-end;
+    }
+
+    #terminal-input {
+        min-height: 170px;
+        font-size: 15px;
+    }
+
+    #terminal-output {
+        min-height: 320px;
+        font-size: 12px;
+    }
+}
+</style>

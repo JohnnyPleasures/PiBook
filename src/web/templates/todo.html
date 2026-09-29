@@ -1,23 +1,58 @@
-<h2>✓ To-Do List</h2>
-<p style="color: #666; margin-bottom: 24px;">Manage your tasks - changes sync to the e-ink display</p>
+<div class="todo-page">
+    <div class="library-page-header todo-page-header">
+        <div>
+            <h2>✓ To Do</h2>
+            <p>Gere as tarefas do PiBook.</p>
+        </div>
 
-<!-- Add Task Form -->
-<h3>Add New Task</h3>
-<div style="display: flex; gap: 12px; margin-bottom: 32px;">
-    <input type="text" id="new-task-input" placeholder="Enter task description..."
-        style="flex: 1; padding: 12px; font-size: 15px; border: 2px solid #e0e0e0; border-radius: 6px;">
-    <button class="btn" onclick="addTodo()" style="width: 120px;">Add Task</button>
+        <button
+            class="btn btn-secondary todo-open-epaper"
+            onclick="openTodoOnEpaper()"
+        >
+            Abrir no e-paper
+        </button>
+    </div>
+
+    <div
+        id="todo-status"
+        class="message todo-status"
+        style="display:none;"
+    ></div>
+
+    <div class="library-panel todo-add-panel">
+        <div class="library-panel-content">
+            <h3 class="todo-panel-title">Nova tarefa</h3>
+
+            <div class="todo-add-form">
+                <input
+                    type="text"
+                    id="new-task-input"
+                    class="todo-new-input"
+                    placeholder="Escreve uma tarefa…"
+                    autocomplete="off"
+                >
+
+                <button
+                    class="btn todo-add-btn"
+                    onclick="addTodo()"
+                >
+                    ＋ Adicionar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="library-panel todo-list-panel">
+        <div class="library-panel-content">
+            <div class="todo-list-heading">
+                <h3 class="todo-panel-title">Tarefas</h3>
+            </div>
+
+            <div id="todo-list" class="todo-list">
+                <div class="todo-empty">
+                    A carregar tarefas…
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
-
-<!-- Task List -->
-<h3>Tasks</h3>
-<div id="todo-list" style="margin-top: 16px;">
-    <p style="color: #999; text-align: center; padding: 40px;">Loading tasks...</p>
-</div>
-
-<script>
-    // Auto-refresh tasks when navigating to this section
-    if (document.getElementById('todo').classList.contains('active')) {
-        loadTodos();
-    }
-</script>

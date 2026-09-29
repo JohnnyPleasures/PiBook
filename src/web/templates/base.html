@@ -1,122 +1,91 @@
 <!DOCTYPE html>
-<html lang="en">
-
+<html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PiBook Manager</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>PiBook Zero W</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}?v=settings-v2-3">
     <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
     <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
 </head>
-
 <body>
-    <!-- Sidebar Navigation -->
     <div class="sidebar">
         <div class="sidebar-header">
-            <h1><span style="font-size: 0.8em;">📖</span> PiBook <span style="font-size: 0.4em; color: #888;">{{ version
-                    }}</span></h1>
-            <p>by Rolohaun</p>
+            <button
+                class="sidebar-book-toggle"
+                id="sidebar-toggle"
+                type="button"
+                onclick="toggleSidebar()"
+                aria-label="Recolher menu"
+                aria-expanded="true"
+                title="Expandir/recolher menu"
+            >
+                <span class="sidebar-book-icon" aria-hidden="true">📖</span>
+                <span class="sidebar-book-title">PiBook</span>
+            </button>
         </div>
 
         <div class="nav-item active" data-section="info" onclick="switchSection('info')">
-            <span class="nav-icon">ℹ️</span>
-            <span class="nav-text">Info</span>
+            <span class="nav-icon">ℹ️</span><span class="nav-text">Estado</span>
         </div>
-
         <div class="nav-item" data-section="library" onclick="switchSection('library')">
-            <span class="nav-icon">📖</span>
-            <span class="nav-text">E-Reader</span>
+            <span class="nav-icon">📚</span><span class="nav-text">Biblioteca</span>
         </div>
-
+        <div class="nav-item" data-section="remote" onclick="switchSection('remote')">
+            <span class="nav-icon">🎮</span><span class="nav-text">Controlo remoto</span>
+        </div>
         <div class="nav-item" data-section="todo" onclick="switchSection('todo')">
-            <span class="nav-icon">✓</span>
-            <span class="nav-text">To-Do</span>
+            <span class="nav-icon">✓</span><span class="nav-text">Tarefas</span>
         </div>
-
         <div class="nav-item" data-section="ipscanner" onclick="switchSection('ipscanner')">
-            <span class="nav-icon">🔍</span>
-            <span class="nav-text">IP Scanner</span>
+            <span class="nav-icon">📶</span><span class="nav-text">Wi-Fi</span>
         </div>
-
         <div class="nav-item" data-section="klipper" onclick="switchSection('klipper')">
-            <span class="nav-icon"><img src="{{ url_for('static', filename='images/klipper.png') }}" alt="Klipper"
-                    style="width: 20px; height: 20px; vertical-align: middle;"></span>
-            <span class="nav-text">Klipper</span>
+            <span class="nav-icon"><img src="{{ url_for('static', filename='images/klipper.png') }}"
+                alt="Klipper" style="width:20px;height:20px;vertical-align:middle;"></span>
+            <span class="nav-text">Impressoras 3D</span>
         </div>
-
         <div class="nav-item" data-section="settings" onclick="switchSection('settings')">
-            <span class="nav-icon">⚙️</span>
-            <span class="nav-text">Settings</span>
+            <span class="nav-icon">⚙️</span><span class="nav-text">Definições</span>
         </div>
-
         <div class="nav-item" data-section="terminal" onclick="switchSection('terminal')">
-            <span class="nav-icon">💻</span>
-            <span class="nav-text">Terminal</span>
+            <span class="nav-icon">💻</span><span class="nav-text">Terminal</span>
         </div>
-
         <div class="nav-item" data-section="logs" onclick="switchSection('logs')">
-            <span class="nav-icon">📋</span>
-            <span class="nav-text">Logs</span>
+            <span class="nav-icon">📋</span><span class="nav-text">Registos</span>
         </div>
     </div>
 
-    <!-- Main Content -->
-    <div class="main-content">
-        <!-- Info Section -->
-        <div id="info" class="content-section active">
-            {% include 'info.html' %}
-        </div>
+    <main class="main-content">
+        <section id="info" class="content-section active">{% include 'info.html' %}</section>
+        <section id="library" class="content-section">{% include 'library.html' %}</section>
+        <section id="remote" class="content-section">{% include 'remote.html' %}</section>
+        <section id="todo" class="content-section">{% include 'todo.html' %}</section>
+        <section id="ipscanner" class="content-section">{% include 'ipscanner.html' %}</section>
+        <section id="klipper" class="content-section">{% include 'klipper.html' %}</section>
+        <section id="settings" class="content-section">{% include 'settings.html' %}</section>
+        <section id="terminal" class="content-section">{% include 'terminal.html' %}</section>
+        <section id="logs" class="content-section">{% include 'logs.html' %}</section>
+    </main>
 
-        <!-- Library Section -->
-        <div id="library" class="content-section">
-            {% include 'library.html' %}
-        </div>
-
-        <!-- To-Do Section -->
-        <div id="todo" class="content-section">
-            {% include 'todo.html' %}
-        </div>
-
-        <!-- IP Scanner Section -->
-        <div id="ipscanner" class="content-section">
-            {% include 'ipscanner.html' %}
-        </div>
-
-        <!-- Klipper Section -->
-        <div id="klipper" class="content-section">
-            {% include 'klipper.html' %}
-        </div>
-
-        <!-- Settings Section -->
-        <div id="settings" class="content-section">
-            {% include 'settings.html' %}
-        </div>
-
-        <!-- Navigation Section -->
-        <div id="navigation" class="content-section">
-            {% include 'navigation.html' %}
-        </div>
-
-        <!-- Terminal Section -->
-        <div id="terminal" class="content-section">
-            {% include 'terminal.html' %}
-        </div>
-
-        <!-- Logs Section -->
-        <div id="logs" class="content-section">
-            {% include 'logs.html' %}
-        </div>
-    </div>
-
-    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}?v=settings-v2-3"></script>
+    <script src="{{ url_for('static', filename='js/network.js') }}"></script>
     <script>
-        // Initialize on page load
         document.addEventListener('DOMContentLoaded', function () {
-            // Refresh system stats on page load
-            refreshSystemStats();
+            const requested = window.location.hash.replace('#', '');
+            if (requested && document.getElementById(requested)) {
+                switchSection(requested);
+            } else {
+                refreshSystemStats();
+            }
+            window.addEventListener('hashchange', function () {
+                const section = window.location.hash.replace('#', '');
+                if (section && document.getElementById(section)) switchSection(section);
+            });
+            // Polling periódico de system stats é gerido pelo main.js,
+            // respeitando secção visível e perfil energético.
+            syncSystemStatsPolling();
         });
     </script>
 </body>
-
 </html>

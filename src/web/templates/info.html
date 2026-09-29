@@ -1,78 +1,97 @@
-<h2>ℹ️ System Information</h2>
-<p style="color: #666; margin-bottom: 24px;">Real-time system statistics and hardware information</p>
-
-<!-- System Stats Grid -->
-<div class="stats-grid">
-    <div class="stat-card" style="border-left-color: #4CAF50;">
-        <div class="stat-label">CPU Temperature</div>
-        <div id="cpu-temp" class="stat-value">Loading...</div>
+<div class="status-page">
+    <div class="status-page-header">
+        <h2>ℹ️ Estado</h2>
+        <button
+            class="status-refresh"
+            type="button"
+            onclick="refreshSystemStats()"
+            title="Atualizar estado"
+            aria-label="Atualizar estado"
+        >↻</button>
     </div>
 
-    <div class="stat-card" style="border-left-color: #2196F3;">
-        <div class="stat-label">CPU Voltage</div>
-        <div id="cpu-voltage" class="stat-value">Loading...</div>
+    <div class="status-primary-grid">
+        <div class="status-card status-card-battery">
+            <div class="status-card-label">Bateria</div>
+            <div class="status-battery-main">
+                <div id="battery-percentage" class="status-battery-value">—</div>
+                <div class="status-battery-meta">
+                    <div id="battery-state">A carregar...</div>
+                    <div id="battery-electrical">—</div>
+                    <div id="battery-runtime" class="status-battery-runtime"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="status-card">
+            <div class="status-card-label">Energia</div>
+            <div id="effective-power-profile" class="status-card-value">—</div>
+        </div>
+
+        <div class="status-card">
+            <div class="status-card-label">Wi-Fi</div>
+            <div id="wifi-status" class="status-card-value">—</div>
+        </div>
+
+        <div class="status-card">
+            <div class="status-card-label">Bluetooth</div>
+            <div id="bluetooth-status" class="status-card-value">—</div>
+        </div>
+
+        <div class="status-card">
+            <div class="status-card-label">CPU</div>
+            <div id="cpu-temp" class="status-card-value">—</div>
+        </div>
+
+        <div class="status-card">
+            <div class="status-card-label">Ecrã</div>
+            <div id="current-screen" class="status-card-value">—</div>
+        </div>
+
+        <div class="status-card">
+            <div class="status-card-label">Ligado há</div>
+            <div id="uptime" class="status-card-value">—</div>
+        </div>
     </div>
 
-    <div class="stat-card" style="border-left-color: #f44336;">
-        <div class="stat-label">CPU Speed</div>
-        <div id="cpu-speed" class="stat-value">Loading...</div>
-    </div>
+    <details class="status-details">
+        <summary>Detalhes do sistema</summary>
 
-    <div class="stat-card" style="border-left-color: #03A9F4;">
-        <div class="stat-label">Wi-Fi Status</div>
-        <div id="wifi-status" class="stat-value">Loading...</div>
-    </div>
+        <div class="status-details-grid">
+            <div class="status-detail-row">
+                <span>Modelo</span>
+                <strong id="pi-model">—</strong>
+            </div>
 
-    <div class="stat-card" style="border-left-color: #3F51B5;">
-        <div class="stat-label">Bluetooth Status</div>
-        <div id="bluetooth-status" class="stat-value">Loading...</div>
-    </div>
+            <div class="status-detail-row">
+                <span>Tensão CPU</span>
+                <strong id="cpu-voltage">—</strong>
+            </div>
 
-    <div class="stat-card" style="border-left-color: #FF9800;">
-        <div class="stat-label">Undervolt Setting</div>
-        <div id="undervolt-setting" class="stat-value">Loading...</div>
-    </div>
+            <div class="status-detail-row">
+                <span>Frequência CPU</span>
+                <strong id="cpu-speed">—</strong>
+            </div>
 
-    <div class="stat-card" style="border-left-color: #9C27B0;">
-        <div class="stat-label">Throttle Status</div>
-        <div id="throttle-status" class="stat-value">Loading...</div>
-    </div>
+            <div class="status-detail-row">
+                <span>Alimentação / throttling</span>
+                <strong id="throttle-status">—</strong>
+            </div>
 
-    <div class="stat-card" style="border-left-color: #3F51B5;">
-        <div class="stat-label">Active CPU Cores</div>
-        <div id="cpu-cores" class="stat-value">Loading...</div>
-    </div>
+            <div class="status-detail-row">
+                <span>Memória</span>
+                <strong id="memory-usage">—</strong>
+            </div>
 
-    <div class="stat-card" style="border-left-color: #E91E63;">
-        <div class="stat-label">Memory Usage</div>
-        <div id="memory-usage" class="stat-value">Loading...</div>
-    </div>
+            <div class="status-detail-row">
+                <span>Espaço livre</span>
+                <strong id="disk-free">—</strong>
+            </div>
 
-    <div class="stat-card" style="border-left-color: #00BCD4;">
-        <div class="stat-label">Disk Space Free</div>
-        <div id="disk-free" class="stat-value">Loading...</div>
-    </div>
-
-    <div class="stat-card" style="border-left-color: #607D8B;">
-        <div class="stat-label">System Uptime</div>
-        <div id="uptime" class="stat-value" style="font-size: 18px;">Loading...</div>
-    </div>
-
-    <div class="stat-card" style="border-left-color: #795548;">
-        <div class="stat-label">Operating System</div>
-        <div id="os-info" class="stat-value" style="font-size: 18px;">Loading...</div>
-    </div>
+            <div class="status-detail-row status-detail-wide">
+                <span>Sistema</span>
+                <strong id="os-info">—</strong>
+            </div>
+        </div>
+    </details>
 </div>
-
-<button class="btn" onclick="refreshSystemStats()" style="margin-top: 24px; width: 100%;">🔄 Refresh Stats</button>
-
-
-
-<!-- External Links -->
-<h2 style="margin-top: 48px;">🔗 External Links</h2>
-<p style="color: #666; margin-bottom: 24px;">Access related services</p>
-
-<button class="btn" style="background: #9C27B0; width: 100%;"
-    onclick="window.open('http://' + window.location.hostname + ':8421', '_blank')">🔋 PiSugar Battery Manager</button>
-<p class="help-text" style="margin-top: 12px;">Opens PiSugar web interface for advanced battery management and
-    configuration</p>

@@ -1,75 +1,75 @@
-# PiBook E-Reader Configuration
-# This file works identically on Pi 3B+ and Pi Zero 2 W
-
-display:
-  width: 480
-  height: 800
-  rotation: 90                # Rotate 90 degrees for portrait mode
-  dpi: 150                    # DPI for PyMuPDF rendering
-  partial_refresh: true       # Use partial refresh for page turns
-  full_refresh_interval: 10   # Full refresh every N page turns (higher = more battery savings)
-
-library:
-  books_directory: "/home/pi/PiBook/books"
-  items_per_page: 4               # Reduced to 4 for larger covers (100x150)
-  font_size: 20               # For library menu rendering only
-
-reader:
-  page_cache_size: 3          # Reduced from 5 for better battery life
-  zoom: 1.0                   # Page zoom factor (1.0 = fit to screen)
-
-performance:
-  gc_threshold: 50            # Aggressive GC for battery savings
-  gc_on_page_turn: true       # Force GC after page turn
-  preload_next_page: false    # Disabled for battery savings
-
-logging:
-  level: "DEBUG"              # Changed from WARNING for troubleshooting
-  file: "/home/pi/PiBook/logs/pibook.log"  # Persistent log file (not /tmp)
-  console: true               # Enable console output for debugging
-  max_size: "10MB"            # Increased from 1MB for more history
-
-web:
-  port: 5000                  # Web interface port
-  enabled: true               # Enable web server
-  always_on: false            # Disable during sleep for battery savings
-  start_on_boot: true         # Start when app starts
-
 battery:
-  enabled: true               # Enable/disable battery monitoring
-  # Backend auto-detected: pisugar2 → ads1115 → mock
-  # ADS1115 settings (only used if PiSugar2 not detected)
-  adc_channel: 0              # ADC channel (0-3 for ADS1115)
-  voltage_divider_ratio: 2.0  # Voltage divider ratio (2:1)
-  min_voltage: 3.0            # Battery empty voltage (V)
-  max_voltage: 4.2            # Battery full voltage (V)
-  update_interval: 30         # Seconds between readings
-  show_percentage: true       # Show percentage number
-  low_battery_threshold: 20   # Warning threshold (%)
-
+  adc_channel: 0
+  auto_shutdown_enabled: true
+  backend: waveshare_ups_hat_c
+  backend_retry_interval: 15
+  capacity_mah: 4000
+  charge_calibrated_capacity_mah: 4142.5
+  charge_current_threshold_ma: 20.0
+  critical_consecutive_readings: 3
+  critical_voltage: 3.5
+  discharge_calibrated_capacity_mah: 4563.7
+  discharge_current_threshold_ma: -20.0
+  emergency_voltage: 3.35
+  enabled: true
+  ina219_address: 67
+  ina219_bus: 1
+  ina219_shunt_ohms: 0.01
+  low_battery_threshold: 15
+  max_voltage: 4.2
+  min_voltage: 3.2
+  rearm_voltage: 3.7
+  safety_check_interval: 10
+  safety_enabled: true
+  show_percentage: true
+  smoothing_samples: 5
+  soc_max_integration_gap: 120
+  soc_persist_interval: 600
+  soc_persist_step: 0.5
+  soc_restore_max_delta: 30
+  soc_state_file: data/battery_state.json
+  soc_state_stale_age: 21600
+  status_check_interval: 30
+  update_interval: 60
+  voltage_divider_ratio: 2.0
+  warning_consecutive_readings: 2
+  warning_voltage: 3.62
+display:
+  clear_on_shutdown: true
+  height: 800
+  rotation: 90
+  width: 480
+gpio_config: config/gpio_mapping.yaml
+keyboard:
+  enabled: false
+library:
+  books_directory: books
+  font_size: 20
+  items_per_page: 4
+logging:
+  console: true
+  file: logs/pibook.log
+  level: INFO
+  max_size: 5MB
+performance:
+  gc_threshold: 20
 pisugar:
-  socket_path: "/tmp/pisugar-server.sock"  # PiSugar2 server socket
-  button_enabled: true        # Enable PiSugar2 button integration
-  button_socket_path: "/tmp/pibook-button.sock"  # IPC socket for button events
-
-# Power Management (Battery Optimization)
+  button_enabled: false
+  button_socket_path: /tmp/pibook-button.sock
+  socket_path: /tmp/pisugar-server.sock
 power:
-  mode: "balanced"            # Options: maximum_battery, balanced, performance
-  sleep_timeout: 120          # Seconds of inactivity before sleep (2 minutes)
-  cpu_scaling: true           # Enable CPU frequency scaling
-  wifi_power_save: true       # Enable WiFi power management
-  single_core_reading: true   # Disable 3 CPU cores during reading for battery savings
-  # CPU Undervolting (EXPERIMENTAL - reduces power consumption)
-  # WARNING: Setting too low may prevent boot! Have SD card reader ready for recovery.
-  # Range: 0 to -8 (each step = -25mV)
-  # Start conservative: -2 (50mV reduction), test stability before increasing
-  # Forum reference: https://forums.raspberrypi.com/viewtopic.php?t=324988
-  undervolt: -2               # -2 = 50mV reduction (safe starting point for Pi Zero 2 W)
-  # More aggressive: -4 to -6 (100-150mV) after stability testing
-  # Maximum tested: -8 (200mV) - forum user achieved 1.06W from 2.07W on Pi Zero 2 W
-
+  cpu_scaling: true
+  mode: balanced
+  single_core_reading: false
+reader:
+  page_cache_size: 5
+  zoom: 1.0
 reading_progress:
-  enabled: true               # Enable reading position tracking
-  save_on_page_turn: true     # Save after each page turn
-  save_on_sleep: true         # Save when entering sleep
-  progress_file: "data/reading_progress.json"
+  enabled: true
+  progress_file: data/reading_progress.json
+  save_on_page_turn: true
+  save_on_sleep: true
+web:
+  enabled: true
+  port: 5000
+  start_on_boot: true

@@ -1,324 +1,154 @@
-# PiBook E-Reader
+# PiBook
 
-A Python-based E-reader for Raspberry Pi with Waveshare 7.5" e-ink display.
+PiBook is an experimental Raspberry Pi Zero W e-reader built around a
+Waveshare 7.5-inch V2 e-paper display.
 
-## Features
+This repository is an actively developed fork of the original
+`rolohaun/PiBook` project. It contains substantial hardware, software,
+networking, power-management and boot-time changes developed for the current
+PiBook prototype.
 
-- **EPUB Support**: Renders EPUBs with full formatting including tables, SVG, custom fonts, and CSS
-- **Hardware**: Raspberry Pi Zero 2 W, Waveshare 7.5" e-Paper HAT
-- **Battery**: PiSugar2 (1200mAh) with UPS functionality
-- **Display**: 800x480 e-ink display with partial refresh support
-- **Storage**: MicroSD card for books and OS
-- **Connectivity**: WiFi for web interface and book uploads
-- **Expected Battery Life**: 18-24 hours reading time
-- **PiSugar2 Integration**: Battery monitoring and custom button support with auto-detection
-- **Reading Progress**: Automatically saves and restores your page position
-- **Battery Optimized**: 2-3x battery life with aggressive power management
-- **Web Interface**: Manage books and control e-reader from any device
-  - Upload/delete EPUB files wirelessly
-  - Remote page navigation
-  - File management
-- **Network Status**: WiFi and Bluetooth status indicators
-- **Memory Efficient**: Optimized for Pi Zero 2 W (512MB RAM)
+## Current hardware baseline
 
-## Hardware Requirements
+- Raspberry Pi Zero W 1.1
+- Waveshare 7.5-inch e-Paper V2
+- Waveshare UPS HAT C
+- LiPo battery around 4000 mAh
+- Raspberry Pi OS / Raspbian 13 (Trixie)
+- ARMv6
 
-### Essential
-- Raspberry Pi Zero 2 W
-- Waveshare 7.5inch e-Paper HAT (800×480, black/white)
-- MicroSD card (8GB+)
-- **1 Push button** (GPIO control - recommended for daily use)
-- **PiSugar2** battery module (battery, charging, monitoring, button)
+The validated system state is documented in `docs/SYSTEM_BASELINE.md`.
 
-### Setup Guides
-- [PISUGAR2_SETUP.md](PISUGAR2_SETUP.md) - PiSugar2 installation and configuration
-- [QUICKSTART.md](QUICKSTART.md) - Quick setup guide
+## Current features
 
-## Technology Stack
+- EPUB reading and persistent reading progress
+- physical-button navigation
+- partial and full e-paper refresh management
+- local web interface
+- Wi-Fi and hotspot management
+- captive portal
+- IP/network scanner
+- remote controls and terminal tools
+- battery monitoring and safety shutdown
+- battery-cycle logging
+- configurable power profiles
+- boot guard and boot diagnostics
+- early e-paper boot splash
 
-| Component | Library | Purpose |
-|-----------|---------|---------|
-| EPUB Rendering | PillowTextRenderer | Renders EPUB pages with full formatting |
-| Image Processing | Pillow (PIL) | Image manipulation and 1-bit conversion |
-| Hardware Driver | waveshare-epd | E-ink display driver with partial refresh |
-| GPIO Input | gpiozero | Button handling with press detection |
-| Battery Monitor | PiSugar2 | Battery status and custom button |
-| Configuration | PyYAML | Config file management |
-| Web Server | Flask | Web interface for book management |
+PiBook is still under active development and should not yet be considered a
+final consumer-ready release.
 
 ## Installation
 
-### 1. Flash the SD Card
-Use Raspberry Pi Imager to flash your SD card.
-- **Operating System:** Choose **Raspberry Pi OS Lite (64-bit)**.
+The supported installation entry point is:
 
-![Choose Operating System](docs/setup_images/imager_os.png)
+`sudo ./scripts/install/install.sh`
 
-- **Device:** Select **Raspberry Pi Zero 2 W** (if prompted).
-- In the OS Customisation settings, ensure you apply the following:
-  - **Set hostname:** Choose a memorable hostname (e.g., `pibook`). This makes it easier to connect via SSH using the hostname (e.g., `pibook.local` via Putty) without knowing the IP address.
-  - **Set username and password:** Make sure you remember these!
-  - **Configure wireless LAN:** Enter your Wi-Fi SSID and password to connect to your network.
-  - **Enable SSH:** Turn on SSH (password authentication).
+The installation is split into:
 
-Once the flashing is finished, insert the SD card into your Pi and power it on.
+- `scripts/install/install-packages.sh`
+- `scripts/install/install-waveshare.sh`
+- `scripts/install/install-system.sh`
+- `scripts/install/install-early-splash.sh`
+- `scripts/install/install.sh`
 
-![Write Complete](docs/setup_images/imager_finish.png)
+The current reproducible baseline deliberately assumes:
 
-### 2. Connect and Install Git
-Use Putty to SSH into your Pi using the hostname you configured:
-- **Hostname:** `your-hostname.local` (e.g., `pibook.local`)
-- **Port:** 22
-- Log in with the username and password you set.
+- user: `pi`
+- project: `/home/pi/PiBook`
 
-Update your system and install `git`:
-```bash
-sudo apt update
-sudo apt install git -y
-```
+Support for arbitrary users and installation paths is future work.
 
-### 3. Quick Install
+## Python environment
 
-```bash
-# Clone the repository
-git clone https://github.com/rolohaun/PiBook.git
-cd PiBook
+The Raspberry Pi Zero W baseline uses Debian / Raspberry Pi OS Python packages
+inside a virtual environment created with `--system-site-packages`.
 
-# Run the installation script
-chmod +x scripts/install_dependencies.sh
-./scripts/install_dependencies.sh
+`requirements.txt` is therefore a Python dependency reference. It is not the
+supported installation method for the Pi Zero W baseline.
 
-# Reboot to enable SPI
-sudo reboot
-```
+Optional or legacy backends are listed separately in
+`requirements-optional.txt`.
 
-### 4. Run PiBook
+## Waveshare driver
 
-Reconnect to your Pi after the reboot and verify the script is working:
-```bash
-cd /home/pi/PiBook
-python3 src/main.py
-```
+The large Waveshare upstream repository is not included directly in this
+repository.
 
-### 5. Setup to Run on Reboot
+The installer retrieves the exact upstream revision recorded in
+`patches/waveshare/VENDOR_COMMIT` and applies the PiBook patch
+`patches/waveshare/epdconfig-spi-descriptor-reuse.patch`.
 
-To configure PiBook to start automatically as a service when the Pi boots up:
+The patch reuses the SPI descriptor across display reinitialisation to avoid
+repeated `/dev/spidev0.0` opens.
 
-```bash
-cd /home/pi/PiBook
-sudo cp scripts/pibook.service /etc/systemd/system/
-sudo systemctl enable pibook.service
-sudo systemctl start pibook.service
-```
+## Network configuration
 
-### 6. Add Books
+Real Wi-Fi credentials and NetworkManager identifiers are never stored in Git.
 
-Adding books is now done completely via the web interface. 
-Once PiBook is running, open a web browser on another computer or phone and navigate to `http://<your-hostname>.local:5000` (or `http://<pibook-ip>:5000`). From there, you can easily upload your EPUB files wirelessly.
+Public configuration sources are under `system/network/`.
 
-## Button Wiring (GPIO)
+A new installation must create local
+`/etc/pibook-network/config.json` and
+`/etc/pibook-network/startup.json` from the supplied examples before network
+startup/watchdog behaviour can be fully enabled.
 
-Connect a single button between GPIO 5 and GND:
+## Early e-paper splash
 
-| Button | GPIO Pin (BCM) | Physical Pin | Function |
-|--------|----------------|--------------|----------|
-| Toggle | GPIO 5 | Pin 29 | Short press: Next page<br>Long press: Toggle library/reader |
+The early splash is built from source.
 
-**Wiring:**
-- Connect one side of the button to GPIO 5 (Physical Pin 29)
-- Connect the other side to GND (Physical Pin 30)
-- Internal pull-up resistor is enabled in software
+The validated design inserts a small `newc` CPIO overlay immediately before
+the normal initramfs ZSTD stream, leaving the original compressed stream
+unchanged.
 
-**Functionality:**
-- **Short press** (< 0.8s): Turn to next page
-- **Long press** (≥ 0.8s): Toggle between library and reader
-- Same behavior as PiSugar2 custom button
+The early-splash helper is reproducible byte-for-byte from the versioned C
+source for the validated baseline.
 
-## Power Management
+Running `./scripts/install/install-early-splash.sh build` creates
+`build/early-splash/initramfs-pibook-candidate`.
 
-PiBook includes extensive power optimization for maximum battery life on Pi Zero 2 W.
+It does not replace the active boot initramfs. Promotion and boot testing are
+intentionally separate manual operations.
 
-### Web Interface Settings
+## Runtime data
 
-Access settings at `http://<pibook-ip>:5000/settings`:
+Personal and generated runtime data is excluded from Git, including books,
+logs, backups, diagnostics, build output, reading progress, battery state,
+local settings, Wi-Fi credentials and NetworkManager profile identifiers.
 
-- **CPU Cores at Boot**: Limit active cores (1-4) via kernel `maxcpus` parameter
-  - 4 cores: ~2W (default)
-  - 2 cores: ~1.5W
-  - 1 core: ~1W (maximum battery)
-- **Undervolt Level**: Reduce CPU voltage (0 to -8, each step = -25mV)
-  - 0: No reduction
-  - -2: 50mV reduction (safe starting point)
-  - -4: 100mV reduction
-  - -8: 200mV reduction (maximum, may cause instability)
-
-Both settings require a reboot to take effect.
-
-
-
-### Power Savings Reference
-
-Based on [Jeff Geerling's testing](https://www.jeffgeerling.com/blog/2021/disabling-cores-reduce-pi-zero-2-ws-power-consumption-half):
-
-| Optimization | Savings |
-|--------------|---------|
-| Disable HDMI | ~14mA |
-| Disable Bluetooth | ~25mA |
-| Disable Audio | ~8mA |
-| Disable LEDs | ~3mA |
-| 2 cores instead of 4 | ~25% power reduction |
-| Undervolt -4 | ~10-20% power reduction |
-
-## Managing the Service
-
-If you configured PiBook to run on boot (Step 5 in Installation), you can manage the service with the following commands:
-
-Check service status:
-```bash
-sudo systemctl status pibook.service
-```
-
-View the background service logs:
-```bash
-sudo journalctl -u pibook.service -f
-```
-
-## Troubleshooting
-
-### Display not working
-
-```bash
-# Check SPI enabled
-ls /dev/spi*  # Should see spidev0.0 and spidev0.1
-
-# Enable SPI
-sudo raspi-config nonint do_spi 0
-sudo reboot
-```
-
-### Import errors
-
-```bash
-# Reinstall Python packages
-pip3 install -r requirements.txt
-```
-
-### Permission errors
-
-```bash
-# Add pi user to gpio and spi groups
-sudo usermod -a -G gpio,spi pi
-sudo reboot
-```
-
-### Out of memory
-
-1. Cache sizes are already optimized in `config/config.yaml`
-2. Enable ZRAM if needed:
-   ```bash
-   ./scripts/setup_zram.sh
-   ```
-
-## Project Structure
+Required empty directories are retained using `.gitkeep` files.
 
-```
-PiBook/
-├── src/
-│   ├── main.py                    # Application entry point
-│   ├── config.py                  # Configuration manager
-│   ├── display/
-│   │   └── display_driver.py      # E-ink display driver
-│   ├── reader/
-│   │   ├── epub_renderer.py       # PyMuPDF EPUB renderer
-│   │   └── page_cache.py          # LRU page cache
-│   ├── ui/
-│   │   ├── navigation.py          # Screen navigation
-│   │   └── screens.py             # Library & Reader screens
-│   └── hardware/
-│       └── gpio_handler.py        # GPIO button handler
-├── config/
-│   ├── config.yaml                # Main configuration
-│   └── gpio_mapping.yaml          # GPIO pin mapping
-├── scripts/
-│   ├── install_dependencies.sh    # Installation script
-│   ├── setup_zram.sh              # ZRAM setup (Pi Zero 2 W)
-│   ├── setup_power_optimization.sh # Boot-level power optimizations
-│   ├── apply_undervolt.sh         # Undervolt helper (web interface)
-│   ├── apply_cpu_cores.sh         # CPU cores helper (web interface)
-│   ├── pibook-sudoers             # Sudoers config for power scripts
-│   └── pibook.service             # Systemd service
-├── books/                          # Place EPUB files here
-├── logs/                           # Application logs
-└── requirements.txt
+## Development history
 
-## Usage
+This fork was developed for a significant period before its Git history was
+prepared for publication.
 
+Rather than creating artificial retroactive commits for experiments, reverts
+and intermediate states, the reconstructed development history is documented
+in `docs/DEVELOPMENT_HISTORY.md`.
 
-#### Toggle Button (GPIO 5)
-- **Short press**: Next page (in reader) or move down (in library)
-- **Long press**: Toggle between library and reader
+The first fork commit represents the current validated development baseline.
+Future development should use normal incremental commits.
 
-## Development
+## Current development priorities
 
-### Mock Mode (Testing without hardware)
+Planned work includes:
 
-The application runs in mock mode when hardware is not available:
-- Display output saved to `output/display_output.png`
-- GPIO buttons can be triggered programmatically
-- Useful for testing on development machine
+- e-paper interface v2
+- measured battery and power optimisation
+- battery-curve calibration from real cycle logs
+- UPS HAT physical-button consumption measurement
+- enclosure / physical structure v2
+- hardware improvement analysis
+- outdoor e-paper readability testing
+- further boot optimisation
+- code and architecture cleanup
 
-### Logging
+## Original project and licence
 
-Logs are written to:
-- Console (if enabled in config)
-- `/home/pi/PiBook/logs/app.log`
+This project is based on the original `rolohaun/PiBook` project.
 
-Log level can be adjusted in `config/config.yaml`:
-```yaml
-logging:
-  level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR
-```
-
-### Performance Specifications
-
-**With All Optimizations Enabled:**
-- **Battery**: PiSugar2 1200mAh
-- **Reading Time**: 18-24 hours continuous reading
-- **Standby Time**: 60-80 hours
-- **Page Turn Speed**: ~1-2 seconds (partial refresh)
-- **Full Refresh**: Every 10 pages (configurable)
-- **WiFi**: Off during reading, on in library
-- **Sleep Mode**: 2 minutes inactivity (configurable)
-
-## Implemented Features
-
-- [x] Reading progress persistence (auto-saves page position)
-- [x] Battery level indicator (PiSugar2 integration)
-- [x] Battery optimization (2-3x battery life)
-- [x] Short/long press button detection
-- [x] Partial refresh for e-ink display
-- [x] WiFi and Bluetooth status indicators
-- [x] Web interface for settings and book management
-- [x] CPU core limiting at boot (1-4 cores via maxcpus)
-- [x] CPU undervolting for power savings
-- [x] Sleep mode with configurable timeout
-
-
-## License
-
-MIT License - feel free to modify and distribute
-
-## Credits
-
-- **PyMuPDF**: PDF/EPUB rendering engine
-- **Waveshare**: E-ink display drivers
-- **Pillow**: Python imaging library
-- **gpiozero**: GPIO control library
-
-## Support
-
-For issues, questions, or contributions, please create an issue on the project repository.
-
----
-
-**Happy Reading!** 📚
+The original repository README states that the project is distributed under
+the MIT License. The original revision used as the base of this fork did not
+contain a standalone `LICENSE` file, so this repository preserves the original
+attribution and licence statement rather than inventing copyright metadata.

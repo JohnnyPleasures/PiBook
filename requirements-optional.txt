@@ -1,0 +1,4 @@
+# Optional/legacy hardware backends.
+# Not required by the current Waveshare UPS HAT C baseline.
+
+adafruit-circuitpython-ads1x15

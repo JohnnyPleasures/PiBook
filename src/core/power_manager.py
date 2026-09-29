@@ -30,7 +30,7 @@ class PowerManager:
         self.is_sleeping = False
         self.last_activity_time = time.time()
         self.sleep_enabled = True
-        self.sleep_timeout = config.get('power.sleep_timeout', 120)
+        self.sleep_timeout = 120
         
     def set_cpu_cores(self, num_cores: int):
         """
@@ -175,23 +175,3 @@ class PowerManager:
         self.logger.info("Waking from sleep")
         self.is_sleeping = False
         self.reset_activity()
-    
-    def disable_wifi(self):
-        """Disable WiFi for battery savings"""
-        if not self.config.get('web.always_on', False):
-            try:
-                os.system("sudo ifconfig wlan0 down")
-                self.logger.info("📶 WiFi disabled for battery savings")
-            except Exception as e:
-                self.logger.warning(f"Failed to disable WiFi: {e}")
-    
-    def enable_wifi(self):
-        """Enable WiFi"""
-        if not self.config.get('web.always_on', False):
-            try:
-                os.system("sudo ifconfig wlan0 up")
-                self.logger.info("📶 WiFi enabled")
-                # Wait a moment for WiFi to come up
-                time.sleep(2)
-            except Exception as e:
-                self.logger.warning(f"Failed to enable WiFi: {e}")

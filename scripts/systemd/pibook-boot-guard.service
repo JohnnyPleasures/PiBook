@@ -1,0 +1,7 @@
+[Unit]
+Description=PiBook automatic boot rollback guard
+ConditionPathExists=/var/lib/pibook-boot-guard/armed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pibook-boot-guard check

@@ -1,0 +1,52 @@
+PiBook Early Splash Visual V1 — VALIDATED
+
+Tryboot:
+  tryboot = 1
+
+Splash:
+  hook start            5.77 s
+  SPI ready             5.83 s
+  spidev ready          5.88 s
+  hardware ready        5.90 s
+  helper start          5.916 s
+  init_fast start       5.918 s
+  init_fast done        6.121 s
+  refresh start         6.123 s
+  visible               7.883 s
+
+Boot:
+  root EXT4 RO          10.497 s
+  root EXT4 RW          19.992 s
+  kernel                11.492 s
+  userspace             18.660 s
+  total systemd         30.152 s
+  multi-user            18.648 s userspace
+
+PiBook:
+  app start             35.017 s
+  e-paper HW ready      38.835 s
+  Waveshare UPS         40.286 s
+  display FAST init     40.982 s
+  FIRST FULL refresh    41.451 s
+  Physical UI ready     44.060 s
+  web server            53.723 s
+
+Validacao funcional:
+  splash fisicamente observada: OK
+  orientacao: OK
+  PIBOOK centrado: OK
+  linha: OK
+  sem rebordo diagnostico: OK
+  sem quadrado diagnostico: OK
+  transicao para Menu Principal: OK
+  Waveshare UPS HAT (C): OK
+  Boot Guard: DISARMED
+  initramfs normal: intacto
+
+Arquitetura:
+  GPIO character device
+  /dev/spidev0.0
+  Waveshare init_fast
+  helper C em background
+  sem wait no initramfs
+  sem raspberrypi_gpiomem adicional

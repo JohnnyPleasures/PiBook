@@ -1,0 +1,8 @@
+[Unit]
+Description=PiBook lazy Wi-Fi kernel driver
+Before=pibook-network-startup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/modprobe brcmfmac
+RemainAfterExit=yes

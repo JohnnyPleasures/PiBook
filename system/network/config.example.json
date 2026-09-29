@@ -1,0 +1,10 @@
+{
+  "interface": "wlan0",
+  "hotspot_ssid": "PiBook",
+  "hotspot_password": "CHANGE-ME-AT-LEAST-8-CHARS",
+  "hotspot_address": "10.42.0.1/24",
+  "channel": 6,
+  "country_code": "PT",
+  "fallback_wifi_uuid": "REPLACE_WITH_NETWORKMANAGER_UUID",
+  "fallback_wifi_name": "REPLACE_WITH_NETWORKMANAGER_NAME"
+}

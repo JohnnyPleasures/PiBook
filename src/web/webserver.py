@@ -6,12 +6,50 @@ Provides web interface for:
 - Book selection
 """
 
-from flask import Flask, render_template, request, jsonify, send_from_directory, redirect, url_for
+from flask import Flask, render_template, request, jsonify, redirect, url_for, Response
 import os
 import logging
 import json
+import platform
+import shutil
+import subprocess
+import threading
+import time
 from werkzeug.utils import secure_filename
 from pathlib import Path
+from src.core.settings import SettingsManager
+from io import BytesIO
+
+from src.utils.epub_metadata import get_epub_title
+
+
+_SCREEN_LABELS = {
+    'main_menu': 'Menu principal',
+    'library': 'Biblioteca',
+    'reader': 'Leitor',
+    'wifi': 'Wi-Fi',
+    'ip_scanner': 'IP Scanner',
+    'todo': 'To Do',
+    'klipper': 'Klipper',
+    'typewriter': 'Terminal',
+}
+
+
+def _screen_label(value):
+    """Human-readable name for an internal PiBook screen identifier."""
+    if value is None:
+        return 'Desconhecido'
+
+    raw = getattr(value, 'value', value)
+    raw = str(raw).strip()
+
+    if not raw or raw == 'unknown':
+        return 'Desconhecido'
+
+    return _SCREEN_LABELS.get(
+        raw,
+        raw.replace('_', ' ').capitalize(),
+    )
 
 
 class PiBookWebServer:
@@ -34,6 +72,13 @@ class PiBookWebServer:
         self.app_instance = app_instance
         self.port = port
         self.version = version
+        self.project_dir = Path(__file__).resolve().parents[2]
+        self.settings_path = self.project_dir / "settings.json"
+        self.service_name = "pibook-zero.service"
+        self._action_lock = threading.RLock()
+        # Serialize settings application. Reader reflow can take tens of
+        # seconds on Pi Zero W and must never overlap another save.
+        self._settings_lock = threading.Lock()
         
         # Configure Flask with template and static folders
         template_dir = os.path.join(os.path.dirname(__file__), 'templates')
@@ -42,13 +87,111 @@ class PiBookWebServer:
         self.flask_app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
         # Initialize To-Do module
-        from apps.todo import TodoManager, todo_bp, init_routes
+        from src.apps.todo.manager import TodoManager
+        from src.apps.todo.routes import todo_bp, init_routes
         self.todo_manager = TodoManager(app_instance=app_instance)
         init_routes(self.todo_manager)
         self.flask_app.register_blueprint(todo_bp)
         self.logger.info("Registered To-Do Blueprint")
 
         self._setup_routes()
+
+        # Register the permanent Wi-Fi/network API after the existing routes.
+        from .network_api import register_network_routes
+        register_network_routes(self)
+
+    def _epub_cache_files(self, epub_path):
+        """Return persistent layout caches belonging to one EPUB."""
+        source = Path(epub_path)
+        prefix = source.name + "."
+
+        try:
+            return [
+                entry
+                for entry in source.parent.iterdir()
+                if entry.is_file()
+                and entry.name.startswith(prefix)
+                and entry.name.endswith(".cache")
+            ]
+        except OSError:
+            return []
+
+    def _epub_temp_cache_files(self, epub_path):
+        """Return abandoned private cache temp files belonging to one EPUB."""
+        source = Path(epub_path)
+        prefix = source.name + "."
+
+        try:
+            return [
+                entry
+                for entry in source.parent.iterdir()
+                if entry.is_file()
+                and entry.name.startswith(prefix)
+                and ".cache." in entry.name
+                and entry.name.endswith(".tmp")
+            ]
+        except OSError:
+            return []
+
+    def _remove_epub_caches(self, epub_path):
+        """Remove all final/stale layout cache files for one EPUB."""
+        removed = []
+
+        for cache_file in (
+            self._epub_cache_files(epub_path)
+            + self._epub_temp_cache_files(epub_path)
+        ):
+            try:
+                cache_file.unlink()
+                removed.append(cache_file.name)
+            except FileNotFoundError:
+                pass
+
+        return removed
+
+    def _move_epub_caches(self, old_epub_path, new_epub_path):
+        """Move compatible persistent caches when an EPUB is renamed."""
+        old_source = Path(old_epub_path)
+        new_source = Path(new_epub_path)
+        moved = []
+
+        # Stale temporary files are never worth carrying forward.
+        for temp_file in self._epub_temp_cache_files(old_source):
+            try:
+                temp_file.unlink()
+            except FileNotFoundError:
+                pass
+
+        for cache_file in self._epub_cache_files(old_source):
+            suffix = cache_file.name[len(old_source.name):]
+            destination = new_source.parent / (new_source.name + suffix)
+
+            # A stale orphan for the destination must never win.
+            if destination.exists():
+                destination.unlink()
+
+            cache_file.rename(destination)
+            moved.append(destination.name)
+
+        return moved
+
+    def _epub_file_change_blocked(self, epub_path):
+        """True while background preparation still owns this EPUB."""
+        preparer = getattr(
+            self.app_instance,
+            "epub_preparation",
+            None,
+        )
+        if preparer is None:
+            return False, None
+
+        try:
+            status = preparer.get_status(str(epub_path))
+        except Exception:
+            return False, None
+
+        state = status.get("state")
+        return state in {"pending", "preparing", "paused"}, status
 
     def _setup_routes(self):
         """Setup Flask routes"""
@@ -61,46 +204,225 @@ class PiBookWebServer:
 
         @self.flask_app.route('/upload', methods=['POST'])
         def upload():
-            """Upload EPUB file(s)"""
+            """Upload one or more EPUB files."""
             if 'file' not in request.files:
-                return jsonify({'error': 'No file uploaded'}), 400
+                return jsonify({'success': False, 'error': 'No file uploaded'}), 400
 
             files = request.files.getlist('file')
-            if not files or files[0].filename == '':
-                return jsonify({'error': 'No files selected'}), 400
+            uploaded = []
+            errors = []
+            books_path = Path(self.books_dir)
+            books_path.mkdir(parents=True, exist_ok=True)
 
-            uploaded_count = 0
             for file in files:
-                if file and file.filename.lower().endswith('.epub'):
-                    filename = secure_filename(file.filename)
-                    filepath = os.path.join(self.books_dir, filename)
-                    file.save(filepath)
-                    self.logger.info(f"Uploaded: {filename}")
-                    uploaded_count += 1
+                original_name = file.filename or ''
+                if not original_name:
+                    continue
+                if not original_name.lower().endswith('.epub'):
+                    errors.append(f'{original_name}: only EPUB files are supported')
+                    continue
 
-            # Reload library screen to show new books
-            self.app_instance.library_screen.load_books(self.books_dir)
-            # Refresh the display if on library screen
-            if self.app_instance.navigation.current_screen.value == 'library':
-                self.app_instance._render_current_screen()
+                filename = secure_filename(original_name)
+                if not filename:
+                    errors.append(f'{original_name}: invalid filename')
+                    continue
 
-            self.logger.info(f"Uploaded {uploaded_count} book(s)")
-            return jsonify({'success': True, 'count': uploaded_count})
+                destination = books_path / filename
+                if destination.exists():
+                    stem = destination.stem
+                    suffix = destination.suffix
+                    counter = 2
+                    while destination.exists():
+                        destination = books_path / f"{stem} ({counter}){suffix}"
+                        counter += 1
 
-        @self.flask_app.route('/delete/<filename>')
+                file.save(destination)
+                uploaded.append(destination.name)
+                self.logger.info("Uploaded: %s", destination.name)
+
+                # Prepare the EPUB asynchronously so the upload request
+                # remains fast and the Reader can later reuse the cache.
+                try:
+                    preparer = getattr(
+                        self.app_instance,
+                        'epub_preparation',
+                        None,
+                    )
+                    if preparer is not None:
+                        state = preparer.enqueue(str(destination))
+                        self.logger.info(
+                            "EPUB preparation state after upload: %s -> %s",
+                            destination.name,
+                            state,
+                        )
+                except Exception as exc:
+                    # Upload remains successful even if preparation cannot
+                    # be queued; cold-open remains a valid fallback.
+                    self.logger.warning(
+                        "Could not queue EPUB preparation for %s: %s",
+                        destination.name,
+                        exc,
+                    )
+
+            if uploaded:
+                self._reload_library()
+
+            status = 200 if uploaded else 400
+            return jsonify({
+                'success': bool(uploaded),
+                'count': len(uploaded),
+                'uploaded': uploaded,
+                'errors': errors,
+                'error': None if uploaded else (errors[0] if errors else 'No valid EPUB files selected')
+            }), status
+
+        @self.flask_app.route('/api/epub/preparation')
+        def epub_preparation_list():
+            """Return preparation status for all EPUBs in one lightweight call."""
+            preparer = getattr(
+                self.app_instance,
+                'epub_preparation',
+                None,
+            )
+
+            if preparer is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'EPUB preparation manager unavailable',
+                }), 503
+
+            books_root = Path(self.books_dir).resolve()
+            result = {}
+
+            try:
+                epub_files = sorted(
+                    (
+                        entry
+                        for entry in books_root.iterdir()
+                        if entry.is_file()
+                        and entry.suffix.lower() == '.epub'
+                    ),
+                    key=lambda entry: entry.name.lower(),
+                )
+            except OSError as exc:
+                return jsonify({
+                    'success': False,
+                    'error': str(exc),
+                }), 500
+
+            for filepath in epub_files:
+                try:
+                    result[filepath.name] = preparer.get_status(str(filepath))
+                except Exception as exc:
+                    result[filepath.name] = {
+                        'state': 'error',
+                        'progress': 0,
+                        'message': str(exc),
+                    }
+
+            return jsonify({
+                'success': True,
+                'books': result,
+            })
+
+        @self.flask_app.route('/api/epub/preparation/<path:filename>')
+        def epub_preparation_status(filename):
+            """Return background preparation status for one EPUB."""
+            safe_name = Path(filename).name
+            filepath = (Path(self.books_dir) / safe_name).resolve()
+            books_root = Path(self.books_dir).resolve()
+
+            if (
+                not safe_name
+                or filename != safe_name
+                or filepath.parent != books_root
+                or filepath.suffix.lower() != '.epub'
+            ):
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid filename',
+                }), 400
+
+            if not filepath.exists():
+                return jsonify({
+                    'success': False,
+                    'error': 'Book not found',
+                }), 404
+
+            preparer = getattr(
+                self.app_instance,
+                'epub_preparation',
+                None,
+            )
+
+            if preparer is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'EPUB preparation manager unavailable',
+                }), 503
+
+            status = preparer.get_status(str(filepath))
+
+            return jsonify({
+                'success': True,
+                'filename': safe_name,
+                **status,
+            })
+
+        @self.flask_app.route('/delete/<path:filename>', methods=['POST', 'GET'])
         def delete(filename):
-            """Delete EPUB file"""
-            filepath = os.path.join(self.books_dir, secure_filename(filename))
-            if os.path.exists(filepath) and filepath.endswith('.epub'):
-                os.remove(filepath)
-                self.logger.info(f"Deleted: {filename}")
+            """Delete an EPUB file safely."""
+            safe_name = Path(filename).name
+            filepath = (Path(self.books_dir) / safe_name).resolve()
+            books_root = Path(self.books_dir).resolve()
 
-                # Reload library screen to show updated book list
-                self.app_instance.library_screen.load_books(self.books_dir)
-                # Refresh the display if on library screen
-                if self.app_instance.navigation.current_screen.value == 'library':
-                    self.app_instance._render_current_screen()
+            if (
+                not safe_name
+                or filename != safe_name
+                or filepath.parent != books_root
+                or filepath.suffix.lower() != '.epub'
+            ):
+                return jsonify({'success': False, 'error': 'Invalid filename'}), 400
+            if not filepath.exists():
+                return jsonify({'success': False, 'error': 'Book not found'}), 404
 
+            current_book = getattr(self.app_instance.reader_screen, 'current_book_path', None)
+            if current_book and Path(current_book).resolve() == filepath:
+                return jsonify({
+                    'success': False,
+                    'error': 'Close the book on the reader before deleting it'
+                }), 409
+
+            blocked, prep_status = self._epub_file_change_blocked(filepath)
+            if blocked:
+                return jsonify({
+                    'success': False,
+                    'error': 'Wait for EPUB preparation to finish before deleting it',
+                    'state': prep_status.get('state'),
+                    'progress': prep_status.get('progress'),
+                }), 409
+
+            filepath.unlink()
+            removed_caches = self._remove_epub_caches(filepath)
+            self.logger.info(
+                "Deleted: %s (removed %d layout cache files)",
+                safe_name,
+                len(removed_caches),
+            )
+
+            try:
+                self.app_instance.progress_manager.clear_progress(str(filepath))
+            except Exception:
+                pass
+
+            self._reload_library()
+
+            if request.method == 'POST' or request.accept_mimetypes.accept_json:
+                return jsonify({
+                    'success': True,
+                    'filename': safe_name,
+                    'removed_caches': len(removed_caches),
+                })
             return redirect(url_for('index'))
 
         @self.flask_app.route('/api/progress/list')
@@ -116,12 +438,13 @@ class PiBookWebServer:
                     result.append({
                         'path': book_path,
                         'filename': os.path.basename(book_path),
+                        'title': get_epub_title(book_path),
                         'current_page': progress['current_page'] + 1,  # 1-indexed for display
                         'total_pages': progress['total_pages'],
                         'last_read': progress.get('last_read', 'Unknown')
                     })
-                # Sort by filename
-                result.sort(key=lambda x: x['filename'].lower())
+                # Sort by the title shown to the user.
+                result.sort(key=lambda x: x['title'].lower())
                 return jsonify({'progress': result})
             except Exception as e:
                 self.logger.error(f"Error listing progress: {e}")
@@ -137,16 +460,109 @@ class PiBookWebServer:
                 data = request.get_json() or {}
                 book_path = data.get('path')
 
-                if book_path == '__all__':
-                    self.app_instance.progress_manager.clear_all_progress()
-                    self.logger.info("Reset all reading positions via web interface")
-                    return jsonify({'status': 'success', 'message': 'All reading positions reset'})
-                elif book_path:
-                    self.app_instance.progress_manager.clear_progress(book_path)
-                    self.logger.info(f"Reset reading position for {os.path.basename(book_path)} via web interface")
-                    return jsonify({'status': 'success', 'message': f'Reset position for {os.path.basename(book_path)}'})
-                else:
-                    return jsonify({'error': 'No book path provided'}), 400
+                with self._action_lock:
+                    if book_path == '__all__':
+                        result = (
+                            self.app_instance.progress_manager
+                            .reset_all_positions()
+                        )
+
+                        # Keep the hot Reader consistent with persisted position.
+                        reader = getattr(
+                            self.app_instance,
+                            'reader_screen',
+                            None,
+                        )
+                        if (
+                            reader
+                            and reader.current_book_path
+                            and reader.renderer
+                        ):
+                            details = (
+                                self.app_instance.progress_manager
+                                .get_progress_details(
+                                    reader.current_book_path
+                                )
+                            )
+                            if (
+                                details
+                                and details.get('status') != 'finished'
+                            ):
+                                reader.go_to_page(
+                                    int(details.get('current_page', 0) or 0)
+                                )
+
+                        self.logger.info(
+                            "Reset active reading positions via web: %s",
+                            result,
+                        )
+                        return jsonify({
+                            'status': 'success',
+                            'message': (
+                                f"{result['reset']} posição(ões) reposta(s); "
+                                f"{result['skipped_finished']} livro(s) concluído(s) preservado(s)"
+                            ),
+                            'result': result,
+                        })
+
+                    elif book_path:
+                        reset = (
+                            self.app_instance.progress_manager
+                            .reset_position(book_path)
+                        )
+
+                        if not reset:
+                            details = (
+                                self.app_instance.progress_manager
+                                .get_progress_details(book_path)
+                            )
+
+                            if (
+                                details
+                                and details.get('status') == 'finished'
+                            ):
+                                return jsonify({
+                                    'error': (
+                                        'Livro concluído: use Reler em vez de '
+                                        'Repor posição'
+                                    )
+                                }), 409
+
+                            return jsonify({
+                                'error': 'Não existe uma leitura ativa para repor'
+                            }), 404
+
+                        reader = getattr(
+                            self.app_instance,
+                            'reader_screen',
+                            None,
+                        )
+
+                        if (
+                            reader
+                            and reader.current_book_path
+                            and os.path.abspath(reader.current_book_path)
+                            == os.path.abspath(book_path)
+                            and reader.renderer
+                        ):
+                            reader.go_to_page(0)
+
+                        self.logger.info(
+                            "Reset reading position for %s via web interface",
+                            os.path.basename(book_path),
+                        )
+
+                        book_title = get_epub_title(book_path)
+
+                        return jsonify({
+                            'status': 'success',
+                            'message': (
+                                f'“{book_title}” foi reposto para a página 1'
+                            ),
+                        })
+
+                    else:
+                        return jsonify({'error': 'No book path provided'}), 400
 
             except Exception as e:
                 self.logger.error(f"Error resetting progress: {e}")
@@ -154,44 +570,388 @@ class PiBookWebServer:
 
         @self.flask_app.route('/rename', methods=['POST'])
         def rename():
-            """Rename EPUB file"""
-            old_name = secure_filename(request.form.get('old_name', ''))
-            new_name = secure_filename(request.form.get('new_name', ''))
+            """Rename an EPUB file."""
+            data = request.get_json(silent=True) or request.form
+            old_raw = str(data.get('old_name', '')).strip()
+            new_raw = str(data.get('new_name', '')).strip()
 
-            if not new_name.endswith('.epub'):
+            old_name = Path(old_raw).name
+            new_name = Path(new_raw).name
+
+            if (
+                not old_name
+                or not new_name
+                or old_raw != old_name
+                or new_raw != new_name
+                or '/' in old_raw
+                or '\\' in old_raw
+                or '/' in new_raw
+                or '\\' in new_raw
+            ):
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid filename',
+                }), 400
+
+            if not old_name.lower().endswith('.epub'):
+                return jsonify({
+                    'success': False,
+                    'error': 'Source file must be an EPUB',
+                }), 400
+
+            if not new_name.lower().endswith('.epub'):
                 new_name += '.epub'
 
-            old_path = os.path.join(self.books_dir, old_name)
-            new_path = os.path.join(self.books_dir, new_name)
+            books_root = Path(self.books_dir).resolve()
+            old_path = (books_root / old_name).resolve()
+            new_path = (books_root / new_name).resolve()
 
-            if os.path.exists(old_path):
-                os.rename(old_path, new_path)
-                self.logger.info(f"Renamed: {old_name} -> {new_name}")
+            if (
+                old_path.parent != books_root
+                or new_path.parent != books_root
+                or new_path.suffix.lower() != '.epub'
+            ):
+                return jsonify({'success': False, 'error': 'Invalid filename'}), 400
+            if not old_path.exists():
+                return jsonify({'success': False, 'error': 'Book not found'}), 404
+            if new_path.exists():
+                return jsonify({'success': False, 'error': 'A book with that name already exists'}), 409
 
-            return redirect(url_for('index'))
+            current_book = getattr(self.app_instance.reader_screen, 'current_book_path', None)
+            if current_book and Path(current_book).resolve() == old_path:
+                return jsonify({
+                    'success': False,
+                    'error': 'Close the book on the reader before renaming it'
+                }), 409
 
-        @self.flask_app.route('/control/<action>')
+            blocked, prep_status = self._epub_file_change_blocked(old_path)
+            if blocked:
+                return jsonify({
+                    'success': False,
+                    'error': 'Wait for EPUB preparation to finish before renaming it',
+                    'state': prep_status.get('state'),
+                    'progress': prep_status.get('progress'),
+                }), 409
+
+            old_path.rename(new_path)
+            moved_caches = self._move_epub_caches(old_path, new_path)
+
+            self.logger.info(
+                "Renamed: %s -> %s (moved %d layout cache files)",
+                old_name,
+                new_name,
+                len(moved_caches),
+            )
+            self._reload_library()
+            return jsonify({
+                'success': True,
+                'old_name': old_name,
+                'new_name': new_name,
+                'moved_caches': len(moved_caches),
+            })
+
+        @self.flask_app.route('/control/<action>', methods=['POST', 'GET'])
+        @self.flask_app.route('/remote/<action>', methods=['POST', 'GET'])
         def control(action):
-            """Remote control actions"""
-            if action == 'next':
-                self.app_instance._handle_next()
-            elif action == 'prev':
-                self.app_instance._handle_prev()
-            elif action == 'select':
-                self.app_instance._handle_select()
-            elif action == 'back':
-                self.app_instance._handle_back()
-            elif action == 'menu':
-                self.app_instance._handle_menu()
+            """Execute a remote navigation action."""
+            actions = {
+                'next': self.app_instance._handle_next,
+                'prev': self.app_instance._handle_prev,
+                # "select" represents confirmation, equivalent to the
+                # physical GPIO5 long press. _handle_toggle is a separate
+                # legacy action and returns from Wi-Fi to the main menu.
+                'select': getattr(
+                    self.app_instance,
+                    '_handle_confirm',
+                    getattr(
+                        self.app_instance,
+                        '_handle_toggle',
+                        self.app_instance._handle_select,
+                    ),
+                ),
+                'back': self.app_instance._handle_back,
+                'menu': self.app_instance._handle_menu,
+            }
+            handler = actions.get(action)
+            if handler is None:
+                return jsonify({'success': False, 'error': 'Unknown action'}), 404
+            if not getattr(self.app_instance, 'running', False):
+                return jsonify({'success': False, 'error': 'PiBook is not ready'}), 503
 
-            return jsonify({'status': 'ok', 'action': action})
+            try:
+                with self._action_lock:
+                    handler()
+                return jsonify({'success': True, 'status': 'ok', 'action': action})
+            except Exception as exc:
+                self.logger.error("Remote action %s failed: %s", action, exc, exc_info=True)
+                return jsonify({'success': False, 'error': str(exc)}), 500
+
+        @self.flask_app.route('/api/menu/open', methods=['POST'])
+        def open_menu_direct():
+            """Open one of the physical main-menu applications directly."""
+            data = request.get_json(silent=True) or request.form
+            screen = str(data.get('screen', '')).strip()
+
+            allowed = {
+                'library',
+                'continue',
+                'wifi',
+                'todo',
+                'typewriter',
+                'shutdown',
+            }
+
+            if screen not in allowed:
+                return jsonify({
+                    'success': False,
+                    'error': 'Unknown menu application',
+                }), 400
+
+            if not getattr(self.app_instance, 'running', False):
+                return jsonify({
+                    'success': False,
+                    'error': 'PiBook is not ready',
+                }), 503
+
+            handler = getattr(
+                self.app_instance,
+                '_open_menu_app_direct',
+                None,
+            )
+
+            if handler is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'Direct menu access unavailable',
+                }), 503
+
+            # Shutdown must return to the browser before the PiBook stops.
+            if screen == 'shutdown':
+                def shutdown_worker():
+                    try:
+                        with self._action_lock:
+                            handler(
+                                screen,
+                                source='WEB DIRECT',
+                            )
+                    except Exception as exc:
+                        self.logger.error(
+                            "Direct Web shutdown failed: %s",
+                            exc,
+                            exc_info=True,
+                        )
+
+                threading.Thread(
+                    target=shutdown_worker,
+                    daemon=True,
+                    name='pibook-web-shutdown',
+                ).start()
+
+                return jsonify({
+                    'success': True,
+                    'status': 'accepted',
+                    'screen': screen,
+                }), 202
+
+            try:
+                with self._action_lock:
+                    success = handler(
+                        screen,
+                        source='WEB DIRECT',
+                    )
+
+                if not success:
+                    return jsonify({
+                        'success': False,
+                        'error': 'Application could not be opened',
+                    }), 409
+
+                return jsonify({
+                    'success': True,
+                    'status': 'ok',
+                    'screen': screen,
+                })
+
+            except Exception as exc:
+                self.logger.error(
+                    "Direct Web menu action %s failed: %s",
+                    screen,
+                    exc,
+                    exc_info=True,
+                )
+                return jsonify({
+                    'success': False,
+                    'error': str(exc),
+                }), 500
+
+        @self.flask_app.route('/api/state')
+        def reader_state():
+            """Return the current PiBook screen and reader state."""
+            screen = getattr(getattr(self.app_instance, 'navigation', None), 'current_screen', None)
+            screen_value = getattr(screen, 'value', str(screen) if screen else 'unknown')
+            reader = getattr(self.app_instance, 'reader_screen', None)
+            state = {
+                'screen': screen_value,
+                'screen_label': _screen_label(screen_value),
+                'book': None,
+                'page': None,
+                'total_pages': None,
+            }
+            if reader is not None:
+                current_path = getattr(reader, 'current_book_path', None)
+                if current_path:
+                    state['book'] = get_epub_title(current_path)
+                if getattr(reader, 'renderer', None):
+                    state['page'] = int(getattr(reader, 'current_page', 0)) + 1
+                    try:
+                        state['total_pages'] = reader.renderer.get_page_count()
+                    except Exception:
+                        pass
+            return jsonify(state)
+
+        @self.flask_app.route('/api/display/preview')
+        def display_preview():
+            """Return the last frame successfully shown on the e-paper."""
+            display = getattr(self.app_instance, 'display', None)
+
+            if display is None or not hasattr(
+                display,
+                'get_last_display_image',
+            ):
+                return jsonify({
+                    'success': False,
+                    'error': 'Display preview unavailable',
+                }), 503
+
+            image = display.get_last_display_image()
+
+            if image is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'No displayed frame available yet',
+                }), 503
+
+            output = BytesIO()
+            image.save(output, format='PNG')
+
+            response = Response(
+                output.getvalue(),
+                mimetype='image/png',
+            )
+            response.headers['Cache-Control'] = 'no-store, max-age=0'
+            return response
+
+        @self.flask_app.route('/api/books/open', methods=['POST'])
+        def open_book():
+            """Open a library book on the e-paper reader."""
+            data = request.get_json(silent=True) or request.form
+            filename = secure_filename(Path(data.get('filename', '')).name)
+            filepath = (Path(self.books_dir) / filename).resolve()
+            books_root = Path(self.books_dir).resolve()
+
+            if filepath.parent != books_root or filepath.suffix.lower() != '.epub':
+                return jsonify({'success': False, 'error': 'Invalid filename'}), 400
+            if not filepath.exists():
+                return jsonify({'success': False, 'error': 'Book not found'}), 404
+
+            book = {
+                'title': get_epub_title(filepath),
+                'path': str(filepath),
+            }
+
+            def worker():
+                try:
+                    with self._action_lock:
+                        self.app_instance._open_book(book)
+                except Exception as exc:
+                    self.logger.error("Opening book from web failed: %s", exc, exc_info=True)
+
+            threading.Thread(target=worker, daemon=True).start()
+            return jsonify({
+                'success': True,
+                'status': 'opening',
+                'filename': filename
+            }), 202
+
+        @self.flask_app.route('/api/books/reread', methods=['POST'])
+        def reread_book():
+            """Start a new reading cycle for a finished EPUB."""
+            data = request.get_json(silent=True) or request.form
+            filename = secure_filename(
+                Path(data.get('filename', '')).name
+            )
+            filepath = (
+                Path(self.books_dir) / filename
+            ).resolve()
+            books_root = Path(self.books_dir).resolve()
+
+            if (
+                filepath.parent != books_root
+                or filepath.suffix.lower() != '.epub'
+            ):
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid filename',
+                }), 400
+
+            if not filepath.exists():
+                return jsonify({
+                    'success': False,
+                    'error': 'Book not found',
+                }), 404
+
+            details = (
+                self.app_instance.progress_manager
+                .get_progress_details(str(filepath))
+            )
+
+            if (
+                not details
+                or details.get('status') != 'finished'
+            ):
+                return jsonify({
+                    'success': False,
+                    'error': (
+                        'Só é possível iniciar uma releitura '
+                        'num livro concluído'
+                    ),
+                }), 409
+
+            book = {
+                'title': get_epub_title(filepath),
+                'path': str(filepath),
+                'start_reread': True,
+            }
+
+            def worker():
+                try:
+                    with self._action_lock:
+                        self.app_instance._open_book(book)
+                except Exception as exc:
+                    self.logger.error(
+                        "Starting re-reading from web failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+
+            threading.Thread(
+                target=worker,
+                daemon=True,
+            ).start()
+
+            return jsonify({
+                'success': True,
+                'status': 'opening',
+                'filename': filename,
+            }), 202
+
+        # To-Do List API Routes
 
         # To-Do List API Routes
         @self.flask_app.route('/api/cpu_voltage')
         def cpu_voltage():
-            """Get current CPU voltage"""
+            """Return the current CPU core voltage when supported."""
             try:
-                import subprocess
                 result = subprocess.run(
                     ['vcgencmd', 'measure_volts', 'core'],
                     capture_output=True,
@@ -199,17 +959,10 @@ class PiBookWebServer:
                     timeout=2
                 )
                 if result.returncode == 0:
-                    voltage = result.stdout.strip()
-                    undervolt_setting = self.app_instance.config.get('power.undervolt', 0)
-                    return jsonify({
-                        'voltage': voltage,
-                        'undervolt_setting': undervolt_setting,
-                        'voltage_reduction_mv': abs(undervolt_setting) * 25
-                    })
-                else:
-                    return jsonify({'error': 'Could not read voltage'}), 500
-            except Exception as e:
-                return jsonify({'error': str(e)}), 500
+                    return jsonify({'voltage': result.stdout.strip()})
+                return jsonify({'error': 'Could not read voltage'}), 500
+            except Exception as exc:
+                return jsonify({'error': str(exc)}), 500
 
         @self.flask_app.route('/api/battery_status')
         def battery_status():
@@ -223,38 +976,177 @@ class PiBookWebServer:
             except Exception as e:
                 return jsonify({'error': str(e)}), 500
 
-        # IP Scanner API Routes
+        @self.flask_app.route('/api/battery_log_snapshot')
+        def battery_log_snapshot():
+            """
+            Return the low-cost snapshot used by the battery cycle logger.
+
+            This endpoint deliberately avoids subprocesses. Battery data comes
+            from the existing monitor, application state comes from memory,
+            and radio state is read from cheap kernel/sysfs interfaces.
+            """
+            try:
+                stats = {}
+
+                # Battery: preserve the same field names historically consumed
+                # by battery_cycle_logger.py.
+                monitor = getattr(
+                    self.app_instance,
+                    'battery_monitor',
+                    None,
+                )
+
+                if monitor is not None:
+                    battery = monitor.get_status()
+
+                    stats.update({
+                        'battery_percentage':
+                            battery.get('percentage'),
+                        'battery_soc_precise':
+                            battery.get('soc_precise'),
+                        'battery_percentage_voltage':
+                            battery.get('percentage_voltage'),
+                        'battery_voltage':
+                            battery.get('voltage'),
+                        'battery_current_ma':
+                            battery.get('current_ma'),
+                        'battery_charging':
+                            battery.get('is_charging'),
+                        'battery_backend':
+                            battery.get('backend'),
+                    })
+
+                # Current physical screen: already available in memory.
+                try:
+                    screen = (
+                        self.app_instance
+                        .navigation
+                        .current_screen
+                    )
+                    stats['current_screen'] = getattr(
+                        screen,
+                        'value',
+                        str(screen),
+                    )
+                except Exception:
+                    stats['current_screen'] = 'unknown'
+
+                stats['current_screen_label'] = _screen_label(
+                    stats.get('current_screen')
+                )
+
+                # Include the effective profile for diagnostics/future clients.
+                try:
+                    profile = getattr(
+                        self.app_instance,
+                        '_effective_power_profile',
+                        None,
+                    )
+                    stats['effective_power_profile'] = (
+                        profile or 'unknown'
+                    )
+                except Exception:
+                    stats['effective_power_profile'] = 'unknown'
+
+                # Wi-Fi administrative state from sysfs.
+                # IFF_UP == 0x1, matching the old "ip link" intent without
+                # starting a subprocess every 30 seconds.
+                try:
+                    flags_text = Path(
+                        '/sys/class/net/wlan0/flags'
+                    ).read_text().strip()
+
+                    flags = int(flags_text, 0)
+
+                    stats['wifi_status'] = (
+                        'On' if (flags & 0x1) else 'Off'
+                    )
+                except FileNotFoundError:
+                    stats['wifi_status'] = 'Off'
+                except Exception:
+                    stats['wifi_status'] = 'Unknown'
+
+                # Bluetooth state directly from rfkill sysfs.
+                # No rfkill entry is the expected true-lazy OFF state.
+                try:
+                    bluetooth_found = False
+                    bluetooth_on = False
+
+                    for entry in Path('/sys/class/rfkill').glob('rfkill*'):
+                        try:
+                            radio_type = (
+                                (entry / 'type')
+                                .read_text()
+                                .strip()
+                                .lower()
+                            )
+                        except Exception:
+                            continue
+
+                        if radio_type != 'bluetooth':
+                            continue
+
+                        bluetooth_found = True
+
+                        try:
+                            state = (
+                                (entry / 'state')
+                                .read_text()
+                                .strip()
+                            )
+                            bluetooth_on = state == '1'
+                        except Exception:
+                            bluetooth_on = False
+
+                        break
+
+                    if not bluetooth_found:
+                        stats['bluetooth_status'] = 'Off'
+                    else:
+                        stats['bluetooth_status'] = (
+                            'On' if bluetooth_on else 'Off'
+                        )
+
+                except Exception:
+                    stats['bluetooth_status'] = 'Unknown'
+
+                return jsonify(stats)
+
+            except Exception as exc:
+                self.logger.error(
+                    "Battery log snapshot failed: %s",
+                    exc,
+                )
+                return jsonify({'error': str(exc)}), 500
+
+        # IP Scanner v2 API Routes
+        from src.core.ip_scanner_service import IPScannerService
+
+        ip_scanner_service = IPScannerService()
+
         @self.flask_app.route('/api/ipscanner/status')
         def ipscanner_status():
-            """Get current IP scanner status"""
+            """Return IP Scanner v2 status and latest results."""
             try:
-                from src.apps.ipscanner.screen import get_ip_address
-
-                scanner = self.app_instance.ip_scanner_screen
-                return jsonify({
-                    'scanning': scanner.scanning,
-                    'progress': scanner.scan_progress,
-                    'devices': scanner.devices,
-                    'local_ip': get_ip_address()
-                })
-            except Exception as e:
-                self.logger.error(f"IP scanner status error: {e}")
-                return jsonify({'error': str(e)}), 500
+                return jsonify(ip_scanner_service.status())
+            except Exception as exc:
+                self.logger.error(
+                    "IP Scanner v2 status error: %s",
+                    exc,
+                )
+                return jsonify({'error': str(exc)}), 503
 
         @self.flask_app.route('/api/ipscanner/scan', methods=['POST'])
         def ipscanner_start():
-            """Start IP scanner"""
+            """Start one asynchronous IP Scanner v2 discovery."""
             try:
-                scanner = self.app_instance.ip_scanner_screen
-
-                if scanner.scanning:
-                    return jsonify({'status': 'already_scanning'})
-
-                scanner.start_scan()
-                return jsonify({'status': 'started'})
-            except Exception as e:
-                self.logger.error(f"IP scanner start error: {e}")
-                return jsonify({'error': str(e)}), 500
+                return jsonify(ip_scanner_service.start())
+            except Exception as exc:
+                self.logger.error(
+                    "IP Scanner v2 start error: %s",
+                    exc,
+                )
+                return jsonify({'error': str(exc)}), 503
 
         # Klipper Printer Discovery API
         # Store discovered printers
@@ -273,6 +1165,7 @@ class PiBookWebServer:
         def klipper_scan():
             """Scan network for Klipper printers"""
             import threading
+            import time
 
             if self.klipper_scanning:
                 return jsonify({'status': 'scanning'})
@@ -282,19 +1175,29 @@ class PiBookWebServer:
                 self.klipper_printers = []
 
                 try:
-                    # Get devices from IP scanner
-                    scanner = self.app_instance.ip_scanner_screen
+                    # Use the shared IP Scanner v2.
+                    status = ip_scanner_service.status()
 
-                    # If no devices scanned yet, trigger a scan
-                    if not scanner.devices and not scanner.scanning:
-                        scanner.start_scan()
-                        # Wait for scan to complete
-                        import time
-                        while scanner.scanning:
-                            time.sleep(0.5)
+                    if not status.get('scanning'):
+                        ip_scanner_service.start()
 
-                    # Check each device for Klipper (port 80 and 7125)
-                    for device in scanner.devices:
+                    deadline = time.monotonic() + 60
+
+                    while time.monotonic() < deadline:
+                        status = ip_scanner_service.status()
+
+                        if not status.get('scanning'):
+                            break
+
+                        time.sleep(0.5)
+
+                    if str(status.get('status', '')).lower() != 'success':
+                        raise RuntimeError(
+                            status.get('error')
+                            or 'Não foi possível pesquisar a rede local.'
+                        )
+
+                    for device in status.get('devices', []):
                         ip = device['ip']
 
                         # Check if port 7125 (Moonraker API) is open
@@ -315,198 +1218,500 @@ class PiBookWebServer:
 
             return jsonify({'status': 'started'})
 
-        @self.flask_app.route('/reboot')
+        def schedule_power_action(action: str):
+            """Clean the display, then request reboot or power-off."""
+            def worker():
+                time.sleep(1.0)
+                try:
+                    self.app_instance.stop()
+                except Exception as exc:
+                    self.logger.error("PiBook cleanup before %s failed: %s", action, exc, exc_info=True)
+                command = 'reboot' if action == 'reboot' else 'poweroff'
+                try:
+                    subprocess.run(
+                        ['sudo', 'systemctl', command],
+                        check=False,
+                        timeout=15
+                    )
+                except Exception as exc:
+                    self.logger.error("System %s failed: %s", action, exc, exc_info=True)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        @self.flask_app.route('/reboot', methods=['POST', 'GET'])
+        @self.flask_app.route('/api/system/reboot', methods=['POST'])
         def reboot():
-            """Reboot the Raspberry Pi"""
-            try:
-                import subprocess
-                self.logger.info("Reboot requested via web interface")
-                # Shutdown in 5 seconds to allow response to be sent
-                subprocess.Popen(['sudo', 'shutdown', '-r', '+0'])
-                return jsonify({'status': 'rebooting'})
-            except Exception as e:
-                self.logger.error(f"Reboot failed: {e}")
-                return jsonify({'error': str(e)}), 500
+            self.logger.info("Graceful reboot requested via web interface")
+            schedule_power_action('reboot')
+            return jsonify({'success': True, 'status': 'rebooting'})
+
+        @self.flask_app.route('/shutdown', methods=['POST'])
+        @self.flask_app.route('/api/system/shutdown', methods=['POST'])
+        def shutdown():
+            self.logger.info("Graceful shutdown requested via web interface")
+            schedule_power_action('shutdown')
+            return jsonify({'success': True, 'status': 'shutting_down'})
 
         @self.flask_app.route('/settings')
         def settings():
-            """Settings page"""
-            settings_data = self._load_settings('settings.json')
-            return render_template_string(SETTINGS_TEMPLATE, settings=settings_data)
+            return redirect(url_for('index') + '#settings')
 
         @self.flask_app.route('/save_settings', methods=['POST'])
         def save_settings():
-            """Save user settings"""
-            try:
-                # Get JSON data from request
-                data = request.get_json()
-                
-                # Fetch current settings to use as defaults for missing fields
-                current_settings = self.app_instance.settings
-                
-                settings_data = {
-                    'zoom': float(data.get('zoom', current_settings.get('zoom', 1.0))),
-                    'full_refresh_interval': int(data.get('full_refresh_interval', current_settings.get('full_refresh_interval', 10))),
-                    'show_page_numbers': data.get('show_page_numbers', current_settings.get('show_page_numbers', False)),
-                    'wifi_while_reading': data.get('wifi_while_reading', current_settings.get('wifi_while_reading', False)),
-                    'sleep_enabled': data.get('sleep_enabled', current_settings.get('sleep_enabled', False)),
-                    'sleep_message': data.get('sleep_message', current_settings.get('sleep_message', "Shh I'm sleeping")),
-                    'sleep_timeout': int(data.get('sleep_timeout', current_settings.get('sleep_timeout', 120))),
-                    'shutdown_message': data.get('shutdown_message', current_settings.get('shutdown_message', 'OFF')),
-                    'items_per_page': int(data.get('items_per_page', current_settings.get('items_per_page', 4))),
-                    'undervolt': int(data.get('undervolt', current_settings.get('undervolt', -2))),
-                    'boot_cores': int(data.get('boot_cores', current_settings.get('boot_cores', 4)))
-                }
-
-                self._save_settings(settings_data)
-                
-                # Force SettingsManager to reload from file so changes take effect immediately
-                self.app_instance.settings_manager.settings = self.app_instance.settings_manager.load()
-                self.app_instance.settings = self.app_instance.settings_manager.get_all()
-                self.logger.info("Settings reloaded in app instance from file")
-
-                # Apply settings to display driver
-                self.app_instance.display.set_full_refresh_interval(settings_data['full_refresh_interval'])
-
-                # Always update reader screen's base properties so future books load with them
-                self.app_instance.reader_screen.zoom_factor = settings_data['zoom']
-                self.app_instance.reader_screen.show_page_numbers = settings_data['show_page_numbers']
-
-                # Apply settings to reader screen if a book is currently open
-                if hasattr(self.app_instance.reader_screen, 'renderer') and self.app_instance.reader_screen.renderer:
-                    # Reload current book with new settings
-                    current_page = self.app_instance.reader_screen.current_page
-                    epub_path = self.app_instance.reader_screen.epub_path
-                    self.app_instance.reader_screen.close()
-                    self.app_instance.reader_screen.load_epub(epub_path, zoom_factor=settings_data['zoom'], dpi=settings_data['dpi'])
-                    self.app_instance.reader_screen.current_page = current_page
-                    self.app_instance._render_current_screen()
-                
-                # Update config with WiFi setting
-                self.app_instance.config.set('web.always_on', settings_data['wifi_while_reading'])
-                
-                # Update config with sleep settings
-                self.app_instance.config.set('power.sleep_timeout', settings_data['sleep_timeout'])
-                self.app_instance.sleep_timeout = settings_data['sleep_timeout']
-                self.app_instance.sleep_enabled = settings_data['sleep_enabled']
-                # Update library screen to show current sleep status
-                self.app_instance.library_screen.sleep_enabled = settings_data['sleep_enabled']
-
-                # Update config with library settings
-                self.app_instance.config.set('library.items_per_page', settings_data['items_per_page'])
-                self.app_instance.library_screen.items_per_page = settings_data['items_per_page']
-
-                # Update undervolt setting in config (requires reboot to take effect)
-                old_undervolt = self.app_instance.config.get('power.undervolt', 0)
-                new_undervolt = settings_data['undervolt']
-                self.app_instance.config.set('power.undervolt', new_undervolt)
-
-                # Save config changes to disk
+            """Save and apply settings supported by the Pi Zero W build."""
+            with self._settings_lock:
                 try:
+                    data = request.get_json(silent=True) or request.form.to_dict()
+                    current = self._load_settings()
+
+                    def as_bool(name, default):
+                        value = data.get(name, default)
+                        if isinstance(value, bool):
+                            return value
+                        return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+                    def bounded_float(name, default, minimum, maximum):
+                        return max(minimum, min(maximum, float(data.get(name, default))))
+
+                    def bounded_int(name, default, minimum, maximum):
+                        return max(minimum, min(maximum, int(float(data.get(name, default)))))
+
+                    power_mode = str(
+                        data.get(
+                            'power_mode',
+                            current.get('power_mode', 'auto'),
+                        )
+                    ).strip().lower()
+
+                    if power_mode not in {
+                        'auto', 'mains', 'battery', 'powersave'
+                    }:
+                        power_mode = 'auto'
+
+                    settings_data = dict(current)
+                    settings_data.update({
+                        'zoom': bounded_float(
+                            'zoom', current.get('zoom', 1.0), 0.5, 2.0
+                        ),
+                        'show_page_numbers': as_bool(
+                            'show_page_numbers',
+                            current.get('show_page_numbers', True),
+                        ),
+                        'sleep_message': str(
+                            data.get(
+                                'sleep_message',
+                                current.get(
+                                    'sleep_message',
+                                    "Shh I'm sleeping",
+                                ),
+                            )
+                        )[:50],
+                        'shutdown_message': str(
+                            data.get(
+                                'shutdown_message',
+                                current.get('shutdown_message', 'OFF'),
+                            )
+                        )[:20],
+                        'items_per_page': bounded_int(
+                            'items_per_page',
+                            current.get('items_per_page', 4),
+                            3,
+                            6,
+                        ),
+                        'library_font_size': bounded_int(
+                            'library_font_size',
+                            current.get('library_font_size', 20),
+                            14,
+                            28,
+                        ),
+                        'power_mode': power_mode,
+                        'auto_powersave_enabled': as_bool(
+                            'auto_powersave_enabled',
+                            current.get('auto_powersave_enabled', True),
+                        ),
+                        'auto_powersave_threshold': bounded_int(
+                            'auto_powersave_threshold',
+                            current.get('auto_powersave_threshold', 30),
+                            5,
+                            80,
+                        ),
+                    })
+                    settings_data.pop('boot_cores', None)
+
+                    # Power Profiles v2.
+                    profiles = json.loads(json.dumps(
+                        current.get('power_profiles', {})
+                    ))
+
+                    for name in ('mains', 'battery', 'powersave'):
+                        profile = profiles.setdefault(name, {})
+
+                        for key in (
+                            'sleep',
+                            'network_reading',
+                            'network_sleep',
+                        ):
+                            field = f'profile_{name}_{key}'
+                            value = str(
+                                data.get(
+                                    field,
+                                    profile.get(key, 'auto'),
+                                )
+                            ).strip().lower()
+
+                            if value not in {'auto', 'on', 'off'}:
+                                value = 'auto'
+
+                            profile[key] = value
+
+                        profile['sleep_timeout'] = max(
+                            30,
+                            min(
+                                3600,
+                                int(float(data.get(
+                                    f'profile_{name}_sleep_timeout',
+                                    profile.get('sleep_timeout', 300),
+                                ))),
+                            ),
+                        )
+
+                        profile['reader_prefetch'] = max(
+                            0,
+                            min(
+                                20,
+                                int(float(data.get(
+                                    f'profile_{name}_reader_prefetch',
+                                    profile.get('reader_prefetch', 3),
+                                ))),
+                            ),
+                        )
+
+                    settings_data['power_profiles'] = profiles
+
+                    old_zoom = float(current.get('zoom', 1.0))
+
+                    self._save_settings(settings_data)
+
+                    manager = getattr(self.app_instance, 'settings_manager', None)
+                    if manager is not None:
+                        manager.settings = manager.load()
+                        self.app_instance.settings = manager.get_all()
+                    else:
+                        self.app_instance.settings = settings_data
+
+                    reader = self.app_instance.reader_screen
+                    reader.zoom_factor = settings_data['zoom']
+                    reader.show_page_numbers = settings_data['show_page_numbers']
+
+                    book_reloaded = False
+                    layout_changed = (
+                        old_zoom != settings_data['zoom']
+                    )
+                    epub_path = (
+                        getattr(reader, 'current_book_path', None)
+                        or getattr(reader, 'epub_path', None)
+                    )
+
+                    if layout_changed and epub_path:
+                        current_page = int(getattr(reader, 'current_page', 0))
+                        book_lock = getattr(
+                            self.app_instance,
+                            '_book_open_lock',
+                            None,
+                        )
+                        if book_lock is None:
+                            raise RuntimeError(
+                                'Reader EPUB lock is unavailable'
+                            )
+
+                        with book_lock:
+                            reader.close()
+                            reader.load_epub(
+                                epub_path,
+                                zoom_factor=settings_data['zoom'],
+                            )
+                            try:
+                                reader.go_to_page(current_page)
+                            except Exception:
+                                reader.current_page = current_page
+
+                        book_reloaded = True
+
+                    library = self.app_instance.library_screen
+                    library.items_per_page = settings_data['items_per_page']
+                    library.font_size = settings_data['library_font_size']
+                    try:
+                        from PIL import ImageFont
+                        library.font = ImageFont.truetype(
+                            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                            library.font_size,
+                        )
+                    except Exception:
+                        library.font = ImageFont.load_default()
+                    self._reload_library(render=False)
+
+                    self.app_instance.config.set('reader.zoom', settings_data['zoom'])
+                    self.app_instance.config.set(
+                        'library.items_per_page',
+                        settings_data['items_per_page']
+                    )
+                    self.app_instance.config.set(
+                        'library.font_size',
+                        settings_data['library_font_size']
+                    )
                     self.app_instance.config.save()
-                    self.logger.info("Configuration saved to disk")
-                except Exception as e:
-                    self.logger.error(f"Failed to save config.yaml: {e}")
 
-                # Update /boot/firmware/config.txt if undervolt changed
-                undervolt_error = None
-                if old_undervolt != new_undervolt:
-                    try:
-                        self._apply_undervolt(new_undervolt)
-                        self.logger.info(f"Undervolt changed from {old_undervolt} to {new_undervolt} - reboot required")
-                    except Exception as e:
-                        self.logger.error(f"Failed to apply undervolt to boot config: {e}")
-                        undervolt_error = str(e)
+                    monitor = getattr(
+                        self.app_instance,
+                        'battery_monitor',
+                        None,
+                    )
+                    percentage = (
+                        monitor.get_percentage()
+                        if monitor is not None
+                        else None
+                    )
+                    power_source = (
+                        monitor.get_power_source()
+                        if monitor is not None
+                        else 'unknown'
+                    )
 
-                # Update /boot/firmware/config.txt if boot_cores changed
-                boot_cores_error = None
-                old_boot_cores = self.app_instance.config.get('power.boot_cores', 4)
-                new_boot_cores = settings_data['boot_cores']
-                self.app_instance.config.set('power.boot_cores', new_boot_cores)
-                if old_boot_cores != new_boot_cores:
-                    try:
-                        self._apply_boot_cores(new_boot_cores)
-                        self.logger.info(f"Boot cores changed from {old_boot_cores} to {new_boot_cores} - reboot required")
-                    except Exception as e:
-                        self.logger.error(f"Failed to apply boot_cores to boot config: {e}")
-                        boot_cores_error = str(e)
+                    self.app_instance._update_power_profile(
+                        percentage,
+                        power_source,
+                    )
 
-                self.logger.info(f"Settings saved: {settings_data}")
+                    if book_reloaded or getattr(self.app_instance, 'running', False):
+                        try:
+                            self.app_instance._render_current_screen()
+                        except Exception as exc:
+                            self.logger.warning("Display refresh after settings failed: %s", exc)
 
-                # Return JSON for AJAX requests, redirect for normal form submission
-                if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.accept_mimetypes.accept_json:
-                    result = {'status': 'success', 'message': 'Settings saved successfully'}
-                    if undervolt_error:
-                        result['undervolt_warning'] = f'Settings saved but undervolt update failed: {undervolt_error}'
-                    if boot_cores_error:
-                        result['boot_cores_warning'] = f'Settings saved but boot_cores update failed: {boot_cores_error}'
-                    return jsonify(result)
-                else:
-                    return redirect(url_for('settings'))
-
-            except Exception as e:
-                self.logger.error(f"Failed to save settings: {e}")
-                return jsonify({'error': str(e)}), 400
+                    self.logger.info("Settings saved for Pi Zero W: %s", settings_data)
+                    return jsonify({
+                        'success': True,
+                        'status': 'success',
+                        'message': 'Settings saved and applied',
+                        'settings': settings_data,
+                        'book_reloaded': book_reloaded,
+                    })
+                except Exception as exc:
+                    self.logger.error("Failed to save settings: %s", exc, exc_info=True)
+                    return jsonify({'success': False, 'error': str(exc)}), 400
 
         @self.flask_app.route('/terminal/execute', methods=['POST'])
         def terminal_execute():
-            """Execute a terminal command"""
-            try:
-                command = request.json.get('command', '').strip()
-                
-                if not command:
-                    return jsonify({'error': 'No command provided'}), 400
-                
-                # Log the command
-                self.logger.info(f"Terminal command: {command}")
-                
-                # Intercept 'git pull' to use safe update script
-                if command.strip() == 'git pull':
-                    command = 'bash /home/pi/PiBook/scripts/safe_update.sh'
-                    self.logger.info("Intercepted git pull, using safe update script")
-                
-                # We will use text/event-stream for SSE to easily stream from Python to JS
-                import subprocess
-                from flask import Response
-                import json
-                
-                def generate():
-                    try:
-                        # Use Popen to stream output
-                        process = subprocess.Popen(
-                            command,
-                            shell=True,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,  # Combine stderr and stdout
-                            text=True,
-                            cwd='/home/pi/PiBook',
-                            bufsize=1  # Line buffered
-                        )
-                        
-                        # Read output line by line as it is generated
-                        for line in iter(process.stdout.readline, ''):
-                            if line:
-                                # Send as SSE event data
-                                yield f"data: {json.dumps({'stdout': line})}\n\n"
-                                
-                        # Wait for process to finish and get return code
+            """Execute a terminal command and stream stdout/stderr as SSE."""
+            import json
+            import os
+            import re
+            import shlex
+            import signal
+            import subprocess
+            import time
+            import uuid
+            from flask import Response, stream_with_context
+
+            payload = request.get_json(silent=True) or {}
+            command = str(payload.get('command', '')).strip()
+            requested_id = str(payload.get('command_id', '')).strip()
+
+            if not command:
+                return jsonify({'error': 'No command provided'}), 400
+
+            if requested_id and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', requested_id):
+                command_id = requested_id
+            else:
+                command_id = uuid.uuid4().hex
+
+            if not hasattr(self, '_terminal_processes'):
+                self._terminal_processes = {}
+
+            normalized = ' '.join(command.split())
+
+            # PiBook is heavily customized locally.
+            # Direct git pull is intentionally blocked because it could
+            # overwrite or conflict with PiBook-specific modifications.
+            if normalized == 'git pull':
+                self.logger.warning(
+                    "Blocked direct git pull from web terminal"
+                )
+                return jsonify({
+                    'error': (
+                        'git pull está bloqueado neste PiBook. '
+                        'As atualizações devem ser aplicadas através dos '
+                        'instaladores PiBook com backup, validação e rollback.'
+                    )
+                }), 409
+
+            # A direct restart would kill the web request that launched it.
+            # Schedule it outside pibook-zero's cgroup and answer the browser first.
+            restart_requested = normalized in {
+                'sudo systemctl restart pibook-zero.service',
+                'sudo systemctl restart pibook-zero',
+            }
+
+            if restart_requested:
+                unit = f"pibook-terminal-restart-{int(time.time())}-{command_id[:8]}"
+                command = (
+                    "sudo systemd-run --quiet "
+                    f"--unit={shlex.quote(unit)} --on-active=2s "
+                    "/bin/systemctl restart pibook-zero.service"
+                )
+
+            self.logger.info("Terminal command [%s] requested", command_id)
+
+            def sse(data):
+                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+            @stream_with_context
+            def generate():
+                process = None
+                started = time.monotonic()
+
+                try:
+                    env = os.environ.copy()
+                    env.update({
+                        'TERM': 'dumb',
+                        'NO_COLOR': '1',
+                        'SYSTEMD_COLORS': '0',
+                        'SYSTEMD_PAGER': 'cat',
+                        'PAGER': 'cat',
+                        'GIT_PAGER': 'cat',
+                        'PYTHONUNBUFFERED': '1',
+                    })
+
+                    process = subprocess.Popen(
+                        command,
+                        shell=True,
+                        executable='/bin/bash',
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        cwd=str(self.project_dir),
+                        bufsize=1,
+                        start_new_session=True,
+                        env=env,
+                    )
+
+                    self._terminal_processes[command_id] = process
+
+                    yield sse({
+                        'type': 'started',
+                        'command_id': command_id,
+                        'pid': process.pid,
+                        'restart_requested': restart_requested,
+                    })
+
+                    for line in iter(process.stdout.readline, ''):
+                        if line:
+                            yield sse({
+                                'type': 'stdout',
+                                'stdout': line,
+                            })
+
+                    if process.stdout:
                         process.stdout.close()
-                        returncode = process.wait()
-                        
-                        # Send final message with return code
-                        yield f"data: {json.dumps({'returncode': returncode})}\n\n"
-                        
-                    except Exception as e:
-                        self.logger.error(f"Error during command execution: {e}")
-                        yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
-                return Response(generate(), mimetype='text/event-stream')
+                    returncode = process.wait()
+                    duration = round(time.monotonic() - started, 2)
 
-            except subprocess.TimeoutExpired:
-                return jsonify({'error': 'Command timed out (30s limit)'}), 408
-            except Exception as e:
-                self.logger.error(f"Terminal command failed: {e}")
-                return jsonify({'error': str(e)}), 500
+                    yield sse({
+                        'type': 'finished',
+                        'returncode': returncode,
+                        'duration': duration,
+                        'restart_requested': restart_requested,
+                    })
+
+                except GeneratorExit:
+                    # If the browser disappears, do not leave an unattended
+                    # command tree running in the background.
+                    if process and process.poll() is None:
+                        try:
+                            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                        except Exception:
+                            pass
+                    raise
+
+                except Exception as exc:
+                    self.logger.error(
+                        "Error during terminal command [%s]: %s",
+                        command_id,
+                        exc,
+                    )
+                    yield sse({
+                        'type': 'error',
+                        'error': str(exc),
+                        'duration': round(time.monotonic() - started, 2),
+                    })
+
+                finally:
+                    self._terminal_processes.pop(command_id, None)
+
+            return Response(
+                generate(),
+                mimetype='text/event-stream',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'X-Accel-Buffering': 'no',
+                },
+            )
+
+        @self.flask_app.route('/terminal/stop', methods=['POST'])
+        def terminal_stop():
+            """Stop a command launched by the web terminal."""
+            import os
+            import signal
+            import subprocess
+
+            payload = request.get_json(silent=True) or {}
+            command_id = str(payload.get('command_id', '')).strip()
+
+            processes = getattr(self, '_terminal_processes', {})
+            process = processes.get(command_id)
+
+            if process is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'Command is not running',
+                }), 404
+
+            if process.poll() is not None:
+                processes.pop(command_id, None)
+                return jsonify({
+                    'success': True,
+                    'status': 'already_finished',
+                })
+
+            try:
+                # start_new_session=True gives each terminal command its own
+                # process group, so children are stopped as well.
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+
+                return jsonify({
+                    'success': True,
+                    'status': 'stopped',
+                })
+
+            except Exception as exc:
+                self.logger.error(
+                    "Failed to stop terminal command [%s]: %s",
+                    command_id,
+                    exc,
+                )
+                return jsonify({
+                    'success': False,
+                    'error': str(exc),
+                }), 500
 
         # Log Viewing APIs
         @self.flask_app.route('/api/logs/app')
@@ -514,7 +1719,7 @@ class PiBookWebServer:
             """Get recent application logs"""
             try:
                 # Default path, although we should prefer config value if accessible cleanly
-                log_path = self.app_instance.config.get('logging.file', '/home/pi/PiBook/logs/pibook.log')
+                log_path = self.app_instance.config.get('logging.file', str(self.project_dir / 'logs' / 'pibook.log'))
                 
                 if not os.path.exists(log_path):
                     return jsonify({'logs': f"Log file not found at {log_path}", 'type': 'app'})
@@ -539,36 +1744,32 @@ class PiBookWebServer:
 
         @self.flask_app.route('/api/logs/system')
         def view_system_logs():
-            """Get recent systemd service logs"""
+            """Get recent logs for the PiBook Zero service."""
             try:
-                import subprocess
-                # Get last 200 lines from journalctl for the pibook service
                 result = subprocess.run(
-                    ['journalctl', '-u', 'pibook', '-n', '200', '--no-pager'],
+                    ['journalctl', '-u', self.service_name, '-n', '200', '--no-pager'],
                     capture_output=True,
                     text=True,
                     timeout=10
                 )
-                
-                if result.returncode == 0:
-                    logs = result.stdout
-                    if not logs.strip():
-                        logs = "No system logs found for 'pibook' service. Is it running as a service?"
-                    return jsonify({'logs': logs, 'type': 'system'})
-                else:
-                    return jsonify({'logs': f"Error reading system logs: {result.stderr}", 'type': 'system'})
-                    
-            except Exception as e:
-                self.logger.error(f"Failed to read system logs: {e}")
-                return jsonify({'error': str(e)}), 500
-                
+                if result.returncode != 0:
+                    return jsonify({
+                        'logs': f"Error reading system logs: {result.stderr}",
+                        'type': 'system'
+                    })
+                logs = result.stdout
+                if not logs.strip():
+                    logs = (
+                        f"No system logs found for {self.service_name}. "
+                        "The service may be disabled while PiBook is run manually."
+                    )
+                return jsonify({'logs': logs, 'type': 'system'})
             except subprocess.TimeoutExpired:
-                return jsonify({'error': 'Command timed out (30s limit)'}), 408
-            except Exception as e:
-                self.logger.error(f"Terminal command failed: {e}")
-                return jsonify({'error': str(e)}), 500
+                return jsonify({'error': 'Reading system logs timed out'}), 408
+            except Exception as exc:
+                self.logger.error("Failed to read system logs: %s", exc)
+                return jsonify({'error': str(exc)}), 500
 
-        # Bluetooth Management APIs
         @self.flask_app.route('/api/bluetooth/status')
         def bluetooth_status():
             """Get Bluetooth status and paired devices"""
@@ -581,20 +1782,44 @@ class PiBookWebServer:
                 powered = 'Soft blocked: no' in result.stdout
                 self.logger.debug(f"Bluetooth status check: powered={powered}, rfkill output: {result.stdout[:100]}")
                 
-                # Get paired devices using helper script for consistency
-                result = subprocess.run(['sudo', '/home/pi/PiBook/scripts/bluetooth_helper.sh', 'paired_devices'],
-                                      capture_output=True, text=True, timeout=10)
+                # When Bluetooth is OFF, never invoke bluetoothctl. With
+                # BlueZ configured on-demand, bluetoothctl could activate
+                # bluetooth.service through D-Bus just to answer a status poll.
+                if not powered:
+                    return jsonify({
+                        'powered': False,
+                        'paired_devices': [],
+                    })
+
+                # Bluetooth is intentionally ON: querying BlueZ is safe.
+                result = subprocess.run(
+                    [
+                        'sudo',
+                        str(self.project_dir / 'scripts' / 'bluetooth_helper.sh'),
+                        'paired_devices',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
                 paired_devices = []
                 for line in result.stdout.strip().split('\n'):
                     if line.startswith('Device '):
                         parts = line.split(' ', 2)
                         if len(parts) >= 3:
-                            paired_devices.append({'mac': parts[1], 'name': parts[2]})
+                            paired_devices.append({
+                                'mac': parts[1],
+                                'name': parts[2],
+                            })
 
-                self.logger.debug(f"Paired devices raw output: {result.stdout}")
-                
-                
-                return jsonify({'powered': powered, 'paired_devices': paired_devices})
+                self.logger.debug(
+                    f"Paired devices raw output: {result.stdout}"
+                )
+
+                return jsonify({
+                    'powered': True,
+                    'paired_devices': paired_devices,
+                })
             except Exception as e:
                 self.logger.error(f"Bluetooth status check failed: {e}")
                 return jsonify({'error': str(e)}), 500
@@ -608,13 +1833,37 @@ class PiBookWebServer:
                 power_on = data.get('power', False)
                 action = 'power_on' if power_on else 'power_off'
                 
-                result = subprocess.run(['sudo', '/home/pi/PiBook/scripts/bluetooth_helper.sh', action], 
+                result = subprocess.run(['sudo', str(self.project_dir / 'scripts' / 'bluetooth_helper.sh'), action],
                                       capture_output=True, text=True, timeout=10)
                 
-                if result.returncode == 0:
-                    return jsonify({'success': True, 'powered': power_on})
-                else:
-                    return jsonify({'error': result.stderr}), 500
+                if result.returncode != 0:
+                    return jsonify({
+                        'error': result.stderr or result.stdout or
+                                 'Bluetooth helper failed'
+                    }), 500
+
+                verify = subprocess.run(
+                    ['rfkill', 'list', 'bluetooth'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if verify.returncode != 0:
+                    return jsonify({
+                        'error': 'Could not verify Bluetooth state'
+                    }), 500
+
+                actual_powered = 'Soft blocked: no' in verify.stdout
+                if actual_powered != power_on:
+                    return jsonify({
+                        'error': 'Bluetooth state did not change as requested',
+                        'powered': actual_powered,
+                    }), 500
+
+                return jsonify({
+                    'success': True,
+                    'powered': actual_powered,
+                })
             except Exception as e:
                 self.logger.error(f"Bluetooth power toggle failed: {e}")
                 return jsonify({'error': str(e)}), 500
@@ -628,7 +1877,7 @@ class PiBookWebServer:
                 scan_on = data.get('scan', False)
                 action = 'scan_on' if scan_on else 'scan_off'
                 
-                result = subprocess.run(['sudo', '/home/pi/PiBook/scripts/bluetooth_helper.sh', action], 
+                result = subprocess.run(['sudo', str(self.project_dir / 'scripts' / 'bluetooth_helper.sh'), action],
                                       capture_output=True, text=True, timeout=10)
                 
                 return jsonify({'success': True, 'scanning': scan_on})
@@ -645,7 +1894,7 @@ class PiBookWebServer:
                 seen_macs = set()
 
                 # Get all known devices using helper script (includes recently discovered ones)
-                result = subprocess.run(['sudo', '/home/pi/PiBook/scripts/bluetooth_helper.sh', 'devices'],
+                result = subprocess.run(['sudo', str(self.project_dir / 'scripts' / 'bluetooth_helper.sh'), 'devices'],
                                       capture_output=True, text=True, timeout=10)
                 for line in result.stdout.strip().split('\n'):
                     if line.startswith('Device '):
@@ -658,7 +1907,7 @@ class PiBookWebServer:
                                 devices.append({'mac': mac, 'name': name})
 
                 # Also get paired devices to mark them
-                paired_result = subprocess.run(['sudo', '/home/pi/PiBook/scripts/bluetooth_helper.sh', 'paired_devices'],
+                paired_result = subprocess.run(['sudo', str(self.project_dir / 'scripts' / 'bluetooth_helper.sh'), 'paired_devices'],
                                              capture_output=True, text=True, timeout=10)
                 paired_macs = set()
                 for line in paired_result.stdout.strip().split('\n'):
@@ -692,7 +1941,7 @@ class PiBookWebServer:
 
                 # For PIN-based pairing, use synchronous call
                 if pin:
-                    result = subprocess.run(['sudo', '/home/pi/PiBook/scripts/bluetooth_helper.sh', 'pair', mac, pin],
+                    result = subprocess.run(['sudo', str(self.project_dir / 'scripts' / 'bluetooth_helper.sh'), 'pair', mac, pin],
                                           capture_output=True, text=True, timeout=60)
                     if result.returncode == 0 or 'successful' in result.stdout.lower():
                         return jsonify({'success': True, 'status': 'paired'})
@@ -702,7 +1951,7 @@ class PiBookWebServer:
                 # For passkey-based pairing (keyboards), start process and read output incrementally
                 # to capture passkey early
                 process = subprocess.Popen(
-                    ['sudo', '/home/pi/PiBook/scripts/bluetooth_helper.sh', 'pair', mac],
+                    ['sudo', str(self.project_dir / 'scripts' / 'bluetooth_helper.sh'), 'pair', mac],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True
@@ -812,7 +2061,7 @@ class PiBookWebServer:
                 if not mac:
                     return jsonify({'error': 'MAC address required'}), 400
                 
-                result = subprocess.run(['sudo', '/home/pi/PiBook/scripts/bluetooth_helper.sh', 'remove', mac], 
+                result = subprocess.run(['sudo', str(self.project_dir / 'scripts' / 'bluetooth_helper.sh'), 'remove', mac],
                                       capture_output=True, text=True, timeout=10)
                 
                 if result.returncode == 0:
@@ -832,14 +2081,15 @@ class PiBookWebServer:
                 
                 stats = {}
                 
-                # CPU Temperature
+                # CPU Temperature - direct kernel/sysfs read.
                 try:
-                    result = subprocess.run(['vcgencmd', 'measure_temp'], capture_output=True, text=True, timeout=2)
-                    if result.returncode == 0:
-                        stats['cpu_temp'] = result.stdout.strip().replace('temp=', '')
-                    else:
-                        stats['cpu_temp'] = 'N/A'
-                except:
+                    temp_milli = int(
+                        Path(
+                            '/sys/class/thermal/thermal_zone0/temp'
+                        ).read_text().strip()
+                    )
+                    stats['cpu_temp'] = f"{temp_milli / 1000:.1f} °C"
+                except Exception:
                     stats['cpu_temp'] = 'N/A'
 
                 # CPU Speed
@@ -862,28 +2112,62 @@ class PiBookWebServer:
                     except:
                         stats['cpu_speed'] = 'N/A'
 
-                # WiFi Status
+                # Wi-Fi administrative state directly from sysfs.
                 try:
-                    result = subprocess.run(['ip', 'link', 'show', 'wlan0'], capture_output=True, text=True, timeout=2)
-                    if result.returncode == 0 and ('state UP' in result.stdout or 'UP' in result.stdout):
-                        stats['wifi_status'] = 'On'
-                    else:
-                        stats['wifi_status'] = 'Off'
-                except:
+                    flags_text = Path(
+                        '/sys/class/net/wlan0/flags'
+                    ).read_text().strip()
+                    flags = int(flags_text, 0)
+                    stats['wifi_status'] = (
+                        'On' if (flags & 0x1) else 'Off'
+                    )
+                except FileNotFoundError:
+                    stats['wifi_status'] = 'Off'
+                except Exception:
                     stats['wifi_status'] = 'Unknown'
 
-                # Bluetooth Status
+                # Bluetooth state directly from rfkill sysfs.
+                # No rfkill entry is the expected true-lazy OFF state.
                 try:
-                    result = subprocess.run(['systemctl', 'is-active', 'bluetooth'], capture_output=True, text=True, timeout=2)
-                    if result.returncode == 0 and result.stdout.strip() == 'active':
-                        hci_result = subprocess.run(['hciconfig', 'hci0'], capture_output=True, text=True, timeout=2)
-                        if hci_result.returncode == 0 and 'UP RUNNING' in hci_result.stdout:
-                            stats['bluetooth_status'] = 'On'
-                        else:
-                            stats['bluetooth_status'] = 'On (No Device)'
-                    else:
+                    bluetooth_found = False
+                    bluetooth_on = False
+
+                    for entry in Path('/sys/class/rfkill').glob('rfkill*'):
+                        try:
+                            radio_type = (
+                                (entry / 'type')
+                                .read_text()
+                                .strip()
+                                .lower()
+                            )
+                        except Exception:
+                            continue
+
+                        if radio_type != 'bluetooth':
+                            continue
+
+                        bluetooth_found = True
+
+                        try:
+                            bluetooth_on = (
+                                (entry / 'state')
+                                .read_text()
+                                .strip()
+                                == '1'
+                            )
+                        except Exception:
+                            bluetooth_on = False
+
+                        break
+
+                    if not bluetooth_found:
                         stats['bluetooth_status'] = 'Off'
-                except:
+                    else:
+                        stats['bluetooth_status'] = (
+                            'On' if bluetooth_on else 'Off'
+                        )
+
+                except Exception:
                     stats['bluetooth_status'] = 'Unknown'
 
                 # CPU Voltage
@@ -895,9 +2179,6 @@ class PiBookWebServer:
                         stats['cpu_voltage'] = 'N/A'
                 except:
                     stats['cpu_voltage'] = 'N/A'
-                
-                # Undervolt setting from config
-                stats['undervolt'] = self.app_instance.config.get('power.undervolt', 0)
                 
                 # Throttle status
                 try:
@@ -974,44 +2255,117 @@ class PiBookWebServer:
                     stats['total_cores'] = 'N/A'
                     stats['active_cores'] = 'N/A'
                 
-                # Disk Space
+                # Disk space without spawning df.
                 try:
-                    result = subprocess.run(['df', '-h', '/'], capture_output=True, text=True, timeout=2)
-                    if result.returncode == 0:
-                        lines = result.stdout.strip().split('\n')
-                        if len(lines) > 1:
-                            parts = lines[1].split()
-                            if len(parts) >= 4:
-                                stats['disk_total'] = parts[1]
-                                stats['disk_used'] = parts[2]
-                                stats['disk_free'] = parts[3]
-                                stats['disk_percent'] = parts[4] if len(parts) > 4 else 'N/A'
-                except:
+                    disk = os.statvfs('/')
+                    total_bytes = disk.f_blocks * disk.f_frsize
+                    free_bytes = disk.f_bavail * disk.f_frsize
+                    used_bytes = total_bytes - (
+                        disk.f_bfree * disk.f_frsize
+                    )
+
+                    def format_size(value):
+                        value = float(value)
+                        for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
+                            if value < 1024 or unit == 'TiB':
+                                if unit in ('GiB', 'TiB'):
+                                    return f"{value:.1f} {unit}"
+                                return f"{value:.0f} {unit}"
+                            value /= 1024
+
+                    stats['disk_total'] = format_size(total_bytes)
+                    stats['disk_used'] = format_size(used_bytes)
+                    stats['disk_free'] = format_size(free_bytes)
+                    stats['disk_percent'] = (
+                        f"{int(round((used_bytes / total_bytes) * 100))}%"
+                        if total_bytes > 0
+                        else '0%'
+                    )
+                except Exception:
                     stats['disk_free'] = 'N/A'
-                
-                # Memory Usage
+
+                # Memory usage directly from /proc/meminfo.
                 try:
-                    result = subprocess.run(['free', '-h'], capture_output=True, text=True, timeout=2)
-                    if result.returncode == 0:
-                        lines = result.stdout.strip().split('\n')
-                        if len(lines) > 1:
-                            parts = lines[1].split()
-                            if len(parts) >= 3:
-                                stats['memory_total'] = parts[1]
-                                stats['memory_used'] = parts[2]
-                                stats['memory_free'] = parts[3] if len(parts) > 3 else 'N/A'
-                                # Calculate percentage
-                                try:
-                                    total = float(parts[1].replace('Gi', '').replace('Mi', ''))
-                                    used = float(parts[2].replace('Gi', '').replace('Mi', ''))
-                                    percent = int((used / total) * 100) if total > 0 else 0
-                                    stats['memory_percent'] = f"{percent}%"
-                                except:
-                                    stats['memory_percent'] = 'N/A'
-                except:
+                    meminfo = {}
+
+                    with open('/proc/meminfo', 'r') as f:
+                        for line in f:
+                            key, value = line.split(':', 1)
+                            meminfo[key] = int(value.strip().split()[0])
+
+                    total_kib = meminfo['MemTotal']
+                    available_kib = meminfo.get(
+                        'MemAvailable',
+                        meminfo.get('MemFree', 0),
+                    )
+                    used_kib = max(0, total_kib - available_kib)
+
+                    def format_memory(kib):
+                        mib = kib / 1024
+                        if mib >= 1024:
+                            return f"{mib / 1024:.1f} GiB"
+                        return f"{mib:.0f} MiB"
+
+                    stats['memory_total'] = format_memory(total_kib)
+                    stats['memory_used'] = format_memory(used_kib)
+                    stats['memory_free'] = format_memory(available_kib)
+                    stats['memory_percent'] = (
+                        f"{int(round((used_kib / total_kib) * 100))}%"
+                        if total_kib > 0
+                        else '0%'
+                    )
+
+                except Exception:
                     stats['memory_used'] = 'N/A'
                     stats['memory_total'] = 'N/A'
-                
+
+                # Raspberry Pi model
+                try:
+                    model_path = Path('/proc/device-tree/model')
+                    stats['model'] = model_path.read_bytes().replace(b'\x00', b'').decode().strip()
+                except Exception:
+                    stats['model'] = platform.machine()
+
+                # Battery information
+                try:
+                    if self.app_instance.battery_monitor:
+                        battery = self.app_instance.battery_monitor.get_status()
+                        stats['battery_percentage'] = battery.get('percentage')
+                        stats['battery_soc_precise'] = battery.get('soc_precise')
+                        stats['battery_percentage_voltage'] = battery.get('percentage_voltage')
+                        stats['battery_voltage'] = battery.get('voltage')
+                        stats['battery_current_ma'] = battery.get('current_ma')
+                        stats['battery_charging'] = battery.get('is_charging')
+                        stats['battery_remaining_hours'] = battery.get(
+                            'remaining_hours_estimate'
+                        )
+                        stats['battery_backend'] = battery.get('backend')
+                except Exception as exc:
+                    self.logger.debug("Battery stats unavailable: %s", exc)
+
+                # Current PiBook screen
+                try:
+                    stats['current_screen'] = self.app_instance.navigation.current_screen.value
+                except Exception:
+                    stats['current_screen'] = 'unknown'
+
+                stats['current_screen_label'] = _screen_label(
+                    stats.get('current_screen')
+                )
+
+                # Effective power profile currently applied to the system.
+                try:
+                    effective_profile = getattr(
+                        self.app_instance,
+                        '_effective_power_profile',
+                        None,
+                    )
+                    stats['effective_power_profile'] = (
+                        effective_profile or 'unknown'
+                    )
+                except Exception:
+                    stats['effective_power_profile'] = 'unknown'
+
                 return jsonify(stats)
                 
             except Exception as e:
@@ -1124,107 +2478,208 @@ class PiBookWebServer:
                 if filename.lower().endswith('.epub'):
                     filepath = os.path.join(self.books_dir, filename)
                     size = os.path.getsize(filepath) / (1024 * 1024)  # MB
+                    progress = None
+                    manager = getattr(
+                        self.app_instance,
+                        'progress_manager',
+                        None,
+                    )
+
+                    if manager is not None:
+                        try:
+                            progress = manager.get_progress_details(filepath)
+                        except Exception as exc:
+                            self.logger.debug(
+                                "Could not load lifecycle for %s: %s",
+                                filename,
+                                exc,
+                            )
+
+                    if progress is None:
+                        status = 'unread'
+                        status_label = 'Não lido'
+                        current_page = 0
+                        total_pages = 0
+                        rating = None
+                        times_finished = 0
+                        reading_seconds = 0.0
+                    else:
+                        status = progress.get('status', 'reading')
+                        times_finished = int(
+                            progress.get('times_finished', 0) or 0
+                        )
+
+                        if status == 'finished':
+                            status_label = 'Lido'
+                        elif status == 'reading' and times_finished > 0:
+                            status_label = 'A reler'
+                        elif status == 'reading':
+                            status_label = 'A ler'
+                        else:
+                            status_label = 'Não lido'
+
+                        current_page = int(
+                            progress.get('current_page', 0) or 0
+                        )
+                        total_pages = int(
+                            progress.get('total_pages', 0) or 0
+                        )
+                        rating = progress.get('rating')
+                        reading_seconds = float(
+                            progress.get(
+                                'total_reading_seconds',
+                                0.0,
+                            ) or 0.0
+                        )
+
+                    if status == 'finished':
+                        progress_percent = 100
+                    elif total_pages > 0:
+                        progress_percent = max(
+                            0,
+                            min(
+                                100,
+                                int(
+                                    round(
+                                        ((current_page + 1) / total_pages)
+                                        * 100
+                                    )
+                                ),
+                            ),
+                        )
+                    else:
+                        progress_percent = 0
+
+                    # Presentation fields for the Web Library.
+                    if progress is None:
+                        reading_time_label = "—"
+                    else:
+                        history = progress.get('reading_history') or []
+                        legacy_unknown = bool(
+                            status == 'finished'
+                            and history
+                            and history[-1].get('reading_seconds') is None
+                            and reading_seconds == 0
+                        )
+
+                        if legacy_unknown:
+                            reading_time_label = "Desconhecido"
+                        else:
+                            seconds = max(0, int(round(reading_seconds)))
+                            hours, remainder = divmod(seconds, 3600)
+                            minutes, seconds = divmod(remainder, 60)
+
+                            if hours:
+                                reading_time_label = (
+                                    f"{hours} h {minutes} min"
+                                )
+                            elif minutes:
+                                reading_time_label = f"{minutes} min"
+                            elif seconds:
+                                reading_time_label = f"{seconds} s"
+                            else:
+                                reading_time_label = "0 min"
+
+                    rating_value = None
+                    try:
+                        if rating is not None:
+                            rating_value = max(
+                                0,
+                                min(10, int(rating)),
+                            )
+                    except (TypeError, ValueError):
+                        rating_value = None
+
+                    rating_stars = []
+                    for index in range(5):
+                        threshold = index * 2
+
+                        if rating_value is None:
+                            star_state = 'empty'
+                        elif rating_value >= threshold + 2:
+                            star_state = 'full'
+                        elif rating_value == threshold + 1:
+                            star_state = 'half'
+                        else:
+                            star_state = 'empty'
+
+                        rating_stars.append(star_state)
+
+                    rating_label = (
+                        f"{rating_value}/10"
+                        if rating_value is not None
+                        else "Sem avaliação"
+                    )
+
+                    if status == 'finished':
+                        open_label = 'Ver resumo'
+                    elif status == 'reading':
+                        open_label = 'Continuar'
+                    else:
+                        open_label = 'Abrir'
+
                     books.append({
                         'filename': filename,
-                        'size': f"{size:.2f} MB"
+                        'path': os.path.abspath(filepath),
+                        'title': get_epub_title(filepath),
+                        'size': f"{size:.2f} MB",
+                        'reading_status': status,
+                        'reading_status_label': status_label,
+                        'current_page': current_page,
+                        'current_page_display': (
+                            current_page + 1
+                            if total_pages > 0
+                            else 0
+                        ),
+                        'total_pages': total_pages,
+                        'progress_percent': progress_percent,
+                        'rating': rating_value,
+                        'rating_label': rating_label,
+                        'rating_stars': rating_stars,
+                        'times_finished': times_finished,
+                        'reading_seconds': reading_seconds,
+                        'reading_time_label': reading_time_label,
+                        'open_label': open_label,
+                        'can_reset_position': (
+                            status == 'reading'
+                            and current_page > 0
+                        ),
+                        'can_reread': (
+                            status == 'finished'
+                        ),
                     })
         return books
 
 
-    def _load_settings(self, settings_file: str) -> dict:
-        """Load settings from file, with defaults from config.yaml"""
-        # Start with defaults from config.yaml
-        default_settings = {
-            'zoom': 1.0,
-            'dpi': 150,
-            'full_refresh_interval': self.app_instance.config.get('display.full_refresh_interval', 10),
-            'show_page_numbers': True,
-            'wifi_while_reading': self.app_instance.config.get('web.always_on', False),
-            'sleep_enabled': True,
-            'sleep_message': 'Shh I\'m sleeping',
-            'sleep_timeout': self.app_instance.config.get('power.sleep_timeout', 120),
-            'items_per_page': self.app_instance.config.get('library.items_per_page', 4),
-            'undervolt': self.app_instance.config.get('power.undervolt', -2),
-            'boot_cores': self.app_instance.config.get('power.boot_cores', 4)
-        }
-
-        # Override with saved settings if they exist
-        if os.path.exists(settings_file):
-            try:
-                with open(settings_file, 'r') as f:
-                    saved_settings = json.load(f)
-                    default_settings.update(saved_settings)
-                    self.logger.info(f"Loaded settings from {settings_file}")
-            except Exception as e:
-                self.logger.error(f"Error loading settings: {e}")
-
-        return default_settings
+    def _load_settings(self, settings_file: str = None) -> dict:
+        """Load settings through the shared SettingsManager."""
+        manager = SettingsManager(
+            str(self.settings_path),
+            logger=self.logger,
+        )
+        settings = manager.get_all()
+        settings.pop('boot_cores', None)
+        return settings
 
     def _save_settings(self, settings_data):
-        """Save settings to settings.json"""
-        settings_file = 'settings.json'
-        try:
-            with open(settings_file, 'w') as f:
-                json.dump(settings_data, f, indent=2)
-        except Exception as e:
-            self.logger.error(f"Failed to save settings: {e}")
-            raise
+        """Save settings atomically to the PiBook project directory."""
+        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.settings_path.with_suffix('.json.tmp')
+        temp_path.write_text(
+            json.dumps(settings_data, indent=2, ensure_ascii=False) + '\n',
+            encoding='utf-8'
+        )
+        temp_path.replace(self.settings_path)
 
-    def _apply_undervolt(self, undervolt_value):
-        """Apply undervolt setting to /boot/firmware/config.txt using sudo helper script"""
-        try:
-            import subprocess
-            script_path = '/home/pi/PiBook/scripts/apply_undervolt.sh'
-
-            # Use sudo to run the helper script
-            result = subprocess.run(
-                ['sudo', script_path, str(undervolt_value)],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-
-            if result.returncode == 0:
-                self.logger.info(f"Successfully applied undervolt={undervolt_value} via helper script")
-                self.logger.info(result.stdout.strip())
-            else:
-                self.logger.error(f"Failed to apply undervolt: {result.stderr}")
-                raise Exception(f"Helper script failed: {result.stderr}")
-
-        except subprocess.TimeoutExpired:
-            self.logger.error("Timeout applying undervolt setting")
-            raise
-        except Exception as e:
-            self.logger.error(f"Failed to apply undervolt: {e}")
-            raise
-
-    def _apply_boot_cores(self, num_cores):
-        """Apply boot CPU cores setting via maxcpus in /boot/firmware/cmdline.txt using sudo helper script"""
-        try:
-            import subprocess
-            script_path = '/home/pi/PiBook/scripts/apply_cpu_cores.sh'
-
-            # Use sudo to run the helper script
-            result = subprocess.run(
-                ['sudo', script_path, str(num_cores)],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-
-            if result.returncode == 0:
-                self.logger.info(f"Successfully applied boot_cores={num_cores} via helper script")
-                self.logger.info(result.stdout.strip())
-            else:
-                self.logger.error(f"Failed to apply boot_cores: {result.stderr}")
-                raise Exception(f"Helper script failed: {result.stderr}")
-
-        except subprocess.TimeoutExpired:
-            self.logger.error("Timeout applying boot_cores setting")
-            raise
-        except Exception as e:
-            self.logger.error(f"Failed to apply boot_cores: {e}")
-            raise
+    def _reload_library(self, render: bool = True):
+        """Reload the EPUB list and optionally refresh the e-paper library."""
+        self.app_instance.library_screen.load_books(self.books_dir)
+        if (
+            render
+            and getattr(self.app_instance, 'running', False)
+            and getattr(self.app_instance.navigation.current_screen, 'value', '') == 'library'
+        ):
+            self.app_instance._render_current_screen()
 
     def run(self):
         """Start the web server in a separate thread"""
@@ -1235,5 +2690,5 @@ class PiBookWebServer:
 
     def _run_server(self):
         """Internal method to run Flask server"""
-        self.flask_app.run(host='0.0.0.0', port=self.port, debug=False, use_reloader=False)
+        self.flask_app.run(host='0.0.0.0', port=self.port, debug=False, use_reloader=False, threaded=True)
 

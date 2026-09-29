@@ -1,18 +1,18 @@
-<h2><img src="{{ url_for('static', filename='images/klipper.png') }}" alt="Klipper" style="width: 32px; height: 32px; vertical-align: middle; margin-right: 8px;">Klipper Printers</h2>
-<p style="color: #666; margin-bottom: 24px;">Discover and monitor Klipper/MainsailOS 3D printers on your network</p>
+<h2><img src="{{ url_for('static', filename='images/klipper.png') }}" alt="Klipper" style="width: 32px; height: 32px; vertical-align: middle; margin-right: 8px;">Impressoras 3D</h2>
+<p style="color: #666; margin-bottom: 24px;">Pesquisa impressoras 3D na rede. Suporte atual: Klipper/Moonraker.</p>
 
 <!-- Scan Controls -->
 <div style="display: flex; gap: 12px; margin-bottom: 24px; align-items: center;">
     <button class="btn" id="klipper-scan-btn" onclick="scanForPrinters()">
-        <span id="klipper-scan-btn-text">Scan Network</span>
+        <span id="klipper-scan-btn-text">Pesquisar</span>
     </button>
     <span id="klipper-status" style="color: #666;"></span>
 </div>
 
 <!-- Printer List -->
-<h3>Printers Found: <span id="printer-count">0</span></h3>
+<h3>Impressoras encontradas: <span id="printer-count">0</span></h3>
 <div id="printer-list" style="margin-top: 16px;">
-    <p style="color: #999; text-align: center; padding: 40px;">Click "Scan Network" to discover Klipper printers</p>
+    <p style="color: #999; text-align: center; padding: 40px;">Click "Pesquisar" to discover Klipper printers</p>
 </div>
 
 <script>
@@ -34,8 +34,8 @@
         const status = document.getElementById('klipper-status');
 
         btn.disabled = true;
-        btnText.textContent = 'Scanning...';
-        status.textContent = 'Scanning network for Klipper printers...';
+        btnText.textContent = 'A pesquisar…';
+        status.textContent = 'A pesquisar impressoras na rede…';
 
         fetch('/api/klipper/scan', { method: 'POST' })
             .then(response => response.json())
@@ -47,8 +47,8 @@
             .catch(err => {
                 console.error('Failed to start scan:', err);
                 btn.disabled = false;
-                btnText.textContent = 'Scan Network';
-                status.textContent = 'Scan failed';
+                btnText.textContent = 'Pesquisar';
+                status.textContent = 'Pesquisa falhou';
             });
     }
 
@@ -80,7 +80,7 @@
         const status = document.getElementById('klipper-status');
 
         btn.disabled = false;
-        btnText.textContent = 'Scan Network';
+        btnText.textContent = 'Pesquisar';
         status.textContent = '';
     }
 
@@ -91,14 +91,14 @@
         document.getElementById('printer-count').textContent = printers.length;
 
         if (data.scanning) {
-            document.getElementById('klipper-status').textContent = 'Scanning...';
+            document.getElementById('klipper-status').textContent = 'A pesquisar…';
         }
 
         if (printers.length === 0) {
             if (data.scanning) {
-                listContainer.innerHTML = '<p style="color: #999; text-align: center; padding: 40px;">Scanning network for Klipper printers...</p>';
+                listContainer.innerHTML = '<p style="color: #999; text-align: center; padding: 40px;">A pesquisar impressoras na rede…</p>';
             } else {
-                listContainer.innerHTML = '<p style="color: #999; text-align: center; padding: 40px;">No Klipper printers found. Click "Scan Network" to search.</p>';
+                listContainer.innerHTML = '<p style="color: #999; text-align: center; padding: 40px;">Não foram encontradas impressoras Klipper. Seleciona “Pesquisar” para procurar.</p>';
             }
             return;
         }
@@ -108,7 +108,7 @@
             const statusColor = printer.state === 'ready' ? '#28a745' :
                                printer.state === 'printing' ? '#007bff' :
                                printer.state === 'error' ? '#dc3545' : '#666';
-            const statusText = printer.state || 'Unknown';
+            const statusText = printer.state || 'Desconhecido';
 
             html += `
             <div style="background: #f9f9f9; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px;">
@@ -125,10 +125,10 @@
 
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;">
                     <div>
-                        <strong>IP Address:</strong> ${printer.ip}
+                        <strong>Endereço IP:</strong> ${printer.ip}
                     </div>
                     <div>
-                        <strong>Klipper Version:</strong> ${printer.klipper_version || 'N/A'}
+                        <strong>Estado Klipper:</strong> ${printer.klipper_version || 'N/A'}
                     </div>
                 </div>`;
 
@@ -137,16 +137,16 @@
                 <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #ddd;">
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;">
                         <div>
-                            <strong>Extruder:</strong> ${printer.extruder_temp.toFixed(1)}°C / ${printer.extruder_target.toFixed(1)}°C
+                            <strong>Extrusor:</strong> ${printer.extruder_temp.toFixed(1)}°C / ${printer.extruder_target.toFixed(1)}°C
                         </div>
                         <div>
-                            <strong>Bed:</strong> ${printer.bed_temp.toFixed(1)}°C / ${printer.bed_target.toFixed(1)}°C
+                            <strong>Mesa:</strong> ${printer.bed_temp.toFixed(1)}°C / ${printer.bed_target.toFixed(1)}°C
                         </div>`;
 
                 if (printer.progress !== undefined && printer.state === 'printing') {
                     html += `
                         <div>
-                            <strong>Progress:</strong> ${(printer.progress * 100).toFixed(1)}%
+                            <strong>Progresso:</strong> ${(printer.progress * 100).toFixed(1)}%
                         </div>`;
                 }
 
@@ -158,7 +158,7 @@
             html += `
                 <div style="margin-top: 12px;">
                     <a href="http://${printer.ip}" target="_blank" class="btn" style="display: inline-block; padding: 8px 16px; font-size: 14px;">
-                        Open Mainsail
+                        Abrir interface
                     </a>
                 </div>
             </div>`;

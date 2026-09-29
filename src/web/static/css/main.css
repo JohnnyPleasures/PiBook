@@ -393,3 +393,3134 @@ tr:hover {
         margin: 4px 0;
     }
 }
+
+/* PiBook Wi-Fi and network page — Phase 3E-C */
+.network-page {
+    display: grid;
+    gap: 20px;
+}
+
+.network-heading,
+.network-panel-header,
+.network-action-row,
+.saved-profile-card,
+.saved-profile-actions,
+.wifi-network-card,
+.wifi-network-title-row,
+.network-device-heading,
+.network-modal-actions {
+    display: flex;
+    align-items: center;
+}
+
+.network-heading,
+.network-panel-header,
+.saved-profile-card,
+.wifi-network-card,
+.network-device-heading {
+    justify-content: space-between;
+}
+
+.network-heading {
+    gap: 20px;
+}
+
+.network-heading h2 {
+    margin-bottom: 8px;
+}
+
+.network-heading p,
+.network-panel-header p {
+    margin: 0;
+}
+
+.network-refresh-button {
+    flex: 0 0 auto;
+}
+
+.network-panel {
+    border: 1px solid #e2e8ec;
+    border-radius: 12px;
+    padding: 22px;
+    background: #fff;
+}
+
+.network-panel h3 {
+    margin: 0 0 6px;
+    padding: 0;
+    border: 0;
+    font-size: 20px;
+}
+
+.network-panel-header {
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.network-status-panel {
+    background: #f8fbf9;
+    border-color: #d7e8dc;
+}
+
+.network-mode-badge,
+.wifi-security-badge,
+.saved-profile-active,
+.network-count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.network-mode-badge {
+    min-width: 88px;
+    padding: 8px 14px;
+    background: #eef1f3;
+    color: #52616b;
+}
+
+.network-mode-badge.mode-wifi {
+    background: #dff3e4;
+    color: #1f6b34;
+}
+
+.network-mode-badge.mode-hotspot {
+    background: #e4effb;
+    color: #1f5f95;
+}
+
+.network-mode-badge.mode-transition,
+.network-mode-badge.mode-unknown {
+    background: #fff0d5;
+    color: #8a5a00;
+}
+
+.network-status-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.network-status-item {
+    padding: 14px;
+    border: 1px solid #e5e9ec;
+    border-radius: 9px;
+    background: #fff;
+    min-width: 0;
+}
+
+.network-status-item strong {
+    display: block;
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+}
+
+.network-status-label {
+    color: #6b757c;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+}
+
+.network-action-row,
+.saved-profile-actions,
+.network-modal-actions {
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.network-action-row {
+    margin-top: 18px;
+}
+
+.network-help {
+    margin: 14px 0 0;
+    color: #68737a;
+    font-size: 14px;
+}
+
+.network-message,
+.network-inline-status {
+    border-radius: 8px;
+    padding: 12px 14px;
+}
+
+.network-message {
+    border-left: 4px solid #4b8cc9;
+    background: #edf5fc;
+    color: #204f79;
+}
+
+.network-message.success {
+    border-left-color: #35a353;
+    background: #e6f5ea;
+    color: #1d6531;
+}
+
+.network-message.error {
+    border-left-color: #d7483f;
+    background: #fbe9e7;
+    color: #8c2924;
+}
+
+.network-message.info {
+    border-left-color: #4b8cc9;
+}
+
+.network-inline-status {
+    margin-bottom: 14px;
+    background: #f5f7f8;
+    color: #59656c;
+}
+
+.wifi-network-list,
+.saved-profile-list {
+    display: grid;
+    gap: 10px;
+}
+
+.wifi-network-card,
+.saved-profile-card {
+    gap: 16px;
+    border: 1px solid #e3e7e9;
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: #fafbfb;
+}
+
+.wifi-network-card:hover,
+.saved-profile-card:hover {
+    border-color: #bed5c4;
+    background: #fbfefc;
+}
+
+.wifi-network-main,
+.saved-profile-info {
+    min-width: 0;
+}
+
+.wifi-network-title-row,
+.saved-profile-title {
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.wifi-network-name {
+    overflow-wrap: anywhere;
+}
+
+.wifi-network-details,
+.saved-profile-meta {
+    display: block;
+    margin-top: 5px;
+    color: #68737a;
+    font-size: 13px;
+}
+
+.wifi-security-badge {
+    padding: 3px 8px;
+    background: #eceff1;
+    color: #546069;
+}
+
+.wifi-security-badge.open {
+    background: #fff1d7;
+    color: #8b5b00;
+}
+
+.saved-profile-active {
+    padding: 3px 8px;
+    background: #dff3e4;
+    color: #1f6b34;
+}
+
+.saved-profile-actions .btn,
+.wifi-connect-button {
+    padding: 9px 15px;
+    font-size: 14px;
+}
+
+.network-form-grid {
+    display: grid;
+    grid-template-columns: 1.4fr .8fr 1.4fr .7fr;
+    gap: 14px;
+    align-items: end;
+}
+
+.network-form .form-group {
+    margin: 0;
+}
+
+.network-form input[type="password"],
+.network-form input[type="text"],
+.network-password-field input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    font-size: 14px;
+}
+
+.network-checkbox-field {
+    padding-bottom: 10px;
+}
+
+.network-password-field {
+    display: flex;
+    align-items: stretch;
+}
+
+.network-password-field input {
+    border-radius: 6px 0 0 6px;
+}
+
+.network-password-toggle {
+    border: 2px solid #e0e0e0;
+    border-left: 0;
+    border-radius: 0 6px 6px 0;
+    padding: 0 12px;
+    background: #f2f4f5;
+    color: #34495e;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.network-form > .btn {
+    margin-top: 16px;
+}
+
+.network-empty {
+    padding: 24px;
+    text-align: center;
+    color: #89939a;
+    background: #fafbfb;
+    border: 1px dashed #d7dde0;
+    border-radius: 9px;
+}
+
+.network-local-panel {
+    margin-top: 4px;
+}
+
+.network-scan-progress {
+    margin: 14px 0 20px;
+}
+
+.network-progress-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 7px;
+    color: #59656c;
+}
+
+.network-progress-track {
+    height: 14px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #e1e5e7;
+}
+
+.network-progress-bar {
+    width: 0;
+    height: 100%;
+    background: #4CAF50;
+    transition: width .3s ease;
+}
+
+.network-device-heading {
+    margin: 20px 0 8px;
+}
+
+.network-device-heading h4 {
+    margin: 0;
+    font-size: 17px;
+    color: #34495e;
+}
+
+.network-count-badge {
+    min-width: 30px;
+    padding: 5px 10px;
+    background: #edf2f4;
+    color: #40515b;
+}
+
+.network-table-scroll {
+    overflow-x: auto;
+}
+
+.network-device-table {
+    min-width: 720px;
+}
+
+.network-device-table th {
+    white-space: nowrap;
+}
+
+.network-monospace {
+    font-family: 'Courier New', Consolas, monospace;
+}
+
+.network-http-link {
+    color: #2576b8;
+    font-weight: 600;
+}
+
+.network-modal,
+.network-transition-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+}
+
+.network-modal[hidden],
+.network-transition-overlay[hidden] {
+    display: none;
+}
+
+.network-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(17, 27, 34, .58);
+}
+
+.network-modal-card,
+.network-transition-card {
+    position: relative;
+    width: min(92vw, 480px);
+    margin: 12vh auto 0;
+    border-radius: 14px;
+    background: #fff;
+    padding: 26px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, .28);
+}
+
+.network-modal-card h3,
+.network-transition-card h3 {
+    margin: 0 0 10px;
+    padding: 0;
+    border: 0;
+}
+
+.network-modal-close {
+    position: absolute;
+    top: 10px;
+    right: 14px;
+    border: 0;
+    background: transparent;
+    color: #65727a;
+    font-size: 30px;
+    cursor: pointer;
+}
+
+.network-modal-actions {
+    justify-content: flex-end;
+    margin-top: 18px;
+}
+
+.network-transition-overlay {
+    background: rgba(20, 31, 38, .72);
+    padding: 20px;
+}
+
+.network-transition-card {
+    margin-top: 18vh;
+    text-align: center;
+}
+
+.network-spinner {
+    width: 42px;
+    height: 42px;
+    margin: 0 auto 18px;
+    border: 4px solid #dfe7e2;
+    border-top-color: #4CAF50;
+    border-radius: 50%;
+    animation: networkSpin .9s linear infinite;
+}
+
+.network-transition-address {
+    margin-top: 14px;
+    color: #68737a;
+    font-size: 13px;
+}
+
+@keyframes networkSpin {
+    to { transform: rotate(360deg); }
+}
+
+@media (max-width: 1050px) {
+    .network-status-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .network-form-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 700px) {
+    .network-heading,
+    .network-panel-header,
+    .wifi-network-card,
+    .saved-profile-card {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .network-refresh-button,
+    .network-panel-header > .btn,
+    .wifi-connect-button {
+        width: 100%;
+    }
+
+    .network-status-grid,
+    .network-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .network-checkbox-field {
+        padding-bottom: 0;
+    }
+
+    .saved-profile-actions {
+        width: 100%;
+    }
+
+    .saved-profile-actions .btn {
+        flex: 1 1 140px;
+    }
+}
+
+@media (max-width: 480px) {
+    .network-panel {
+        padding: 16px;
+    }
+
+    .network-modal-card,
+    .network-transition-card {
+        padding: 22px 18px;
+    }
+
+    .network-action-row .btn,
+    .network-modal-actions .btn {
+        width: 100%;
+    }
+}
+
+
+/* =========================================================
+   PiBook responsive shell v2 — fixed collapsible sidebar
+   ========================================================= */
+
+:root {
+    --pibook-sidebar-width: 240px;
+    --pibook-sidebar-collapsed-width: 68px;
+    --pibook-mobile-gap: 12px;
+}
+
+html,
+body {
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+body {
+    min-width: 0;
+}
+
+.sidebar {
+    width: var(--pibook-sidebar-width);
+    transition: width .22s ease;
+    overscroll-behavior: contain;
+}
+
+.sidebar-header {
+    min-height: 86px;
+    padding: 16px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.sidebar-brand {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.sidebar-brand-icon {
+    width: 32px;
+    flex: 0 0 32px;
+    text-align: center;
+    font-size: 25px;
+    line-height: 1;
+}
+
+.sidebar-brand-copy {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.sidebar-header .sidebar-brand-copy h1 {
+    font-size: 21px;
+    line-height: 1.15;
+}
+
+.sidebar-version {
+    font-size: 10px;
+    color: #95a5a6;
+    font-weight: 500;
+}
+
+.sidebar-header .sidebar-brand-copy p {
+    margin-top: 4px;
+}
+
+.sidebar-toggle {
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #465b6d;
+    border-radius: 9px;
+    background: #243746;
+    color: #fff;
+    cursor: pointer;
+    font: inherit;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.sidebar-toggle:hover,
+.sidebar-toggle:focus-visible {
+    background: #34495e;
+    outline: none;
+    border-color: #5d7689;
+}
+
+.sidebar-toggle-icon {
+    display: block;
+    font-size: 28px;
+    line-height: 1;
+    transform: translateY(-1px);
+}
+
+.nav-item {
+    min-height: 54px;
+    width: 100%;
+    padding: 13px 17px;
+    gap: 12px;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.nav-icon {
+    width: 30px;
+    flex: 0 0 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nav-icon img {
+    max-width: 22px;
+    max-height: 22px;
+}
+
+.nav-text {
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.main-content {
+    min-width: 0;
+    margin-left: var(--pibook-sidebar-width);
+    transition: margin-left .22s ease;
+}
+
+body.sidebar-collapsed .sidebar {
+    width: var(--pibook-sidebar-collapsed-width);
+}
+
+body.sidebar-collapsed .main-content {
+    margin-left: var(--pibook-sidebar-collapsed-width);
+}
+
+body.sidebar-collapsed .sidebar-header {
+    padding: 12px 8px;
+    min-height: 118px;
+    flex-direction: column;
+    justify-content: center;
+}
+
+body.sidebar-collapsed .sidebar-brand-copy,
+body.sidebar-collapsed .nav-text {
+    display: none;
+}
+
+body.sidebar-collapsed .sidebar-brand {
+    justify-content: center;
+}
+
+body.sidebar-collapsed .nav-item {
+    justify-content: center;
+    gap: 0;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+body.sidebar-collapsed .nav-icon {
+    width: 32px;
+    flex-basis: 32px;
+    font-size: 21px;
+}
+
+body.sidebar-collapsed .sidebar-toggle {
+    width: 38px;
+    height: 34px;
+    flex-basis: 34px;
+}
+
+.content-section,
+.network-panel,
+.stat-card,
+.form-group,
+.controls,
+table {
+    min-width: 0;
+}
+
+img,
+svg {
+    max-width: 100%;
+}
+
+input,
+select,
+textarea,
+button {
+    max-width: 100%;
+}
+
+/* Tablet and phone */
+@media (max-width: 768px) {
+    :root {
+        --pibook-sidebar-collapsed-width: 68px;
+    }
+
+    .sidebar {
+        width: min(82vw, 270px);
+    }
+
+    /*
+     * On mobile the expanded menu overlays the page instead of shrinking
+     * the already narrow content area. The content always reserves only
+     * the collapsed icon rail.
+     */
+    .main-content,
+    body.sidebar-collapsed .main-content {
+        margin-left: var(--pibook-sidebar-collapsed-width);
+        padding: 12px;
+    }
+
+    body.sidebar-collapsed .sidebar {
+        width: var(--pibook-sidebar-collapsed-width);
+    }
+
+    body:not(.sidebar-collapsed) .sidebar {
+        box-shadow: 8px 0 28px rgba(0, 0, 0, .22);
+    }
+
+    .content-section {
+        padding: 16px;
+        margin-bottom: 12px;
+        border-radius: 9px;
+    }
+
+    h2 {
+        font-size: 23px;
+        margin-bottom: 18px;
+    }
+
+    h3 {
+        font-size: 18px;
+        margin-top: 24px;
+    }
+
+    .btn,
+    button,
+    input,
+    select,
+    textarea {
+        min-height: 44px;
+    }
+
+    .form-group input[type="text"],
+    .form-group input[type="number"],
+    .form-group input[type="file"],
+    .form-group textarea,
+    .form-group select,
+    .network-form input[type="password"],
+    .network-form input[type="text"],
+    .network-password-field input {
+        font-size: 16px;
+    }
+
+    .controls,
+    .stats-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .upload-form {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .upload-form input[type="file"],
+    .upload-form .btn {
+        width: 100%;
+    }
+
+    table {
+        display: block;
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    #terminal-output {
+        min-height: 45vh;
+        max-height: 62vh;
+        padding: 12px;
+        font-size: 12px;
+    }
+}
+
+/* Narrow phones */
+@media (max-width: 480px) {
+    .main-content,
+    body.sidebar-collapsed .main-content {
+        padding: 9px;
+    }
+
+    .content-section {
+        padding: 14px 12px;
+        border-radius: 8px;
+    }
+
+    .sidebar {
+        width: min(86vw, 270px);
+    }
+
+    .btn {
+        min-height: 46px;
+    }
+
+    th,
+    td {
+        padding: 11px 10px;
+    }
+}
+
+/* Mobile sidebar refinement v1 */
+@media (max-width: 768px) {
+    body:not(.sidebar-collapsed) .sidebar {
+        width: min(72vw, 220px);
+    }
+
+    body:not(.sidebar-collapsed) .nav-text {
+        display: block;
+    }
+
+    body:not(.sidebar-collapsed) .nav-item {
+        justify-content: flex-start;
+        padding-left: 16px;
+        padding-right: 12px;
+        gap: 10px;
+    }
+
+    body:not(.sidebar-collapsed) .sidebar-header {
+        min-height: 82px;
+        flex-direction: row;
+        justify-content: space-between;
+        padding: 14px 12px;
+    }
+
+    body:not(.sidebar-collapsed) .sidebar-brand-copy {
+        display: block;
+    }
+}
+
+@media (max-width: 480px) {
+    body:not(.sidebar-collapsed) .sidebar {
+        width: min(74vw, 210px);
+    }
+}
+
+/* Mobile sidebar width refinement v2 */
+@media (max-width: 768px) {
+    body:not(.sidebar-collapsed) .sidebar {
+        width: 180px;
+    }
+}
+
+@media (max-width: 480px) {
+    body:not(.sidebar-collapsed) .sidebar {
+        width: 176px;
+    }
+}
+
+/* Mobile sidebar width refinement v3 */
+@media (max-width: 768px) {
+    body:not(.sidebar-collapsed) .sidebar {
+        width: 162px;
+    }
+}
+
+@media (max-width: 480px) {
+    body:not(.sidebar-collapsed) .sidebar {
+        width: 158px;
+    }
+}
+
+
+/* Sidebar book toggle + hard zoom guard v2 */
+html,
+body {
+    touch-action: pan-x pan-y;
+    -ms-touch-action: pan-x pan-y;
+}
+
+.sidebar-header {
+    min-height: 104px;
+    padding: 10px 6px 12px;
+    justify-content: center;
+}
+
+.sidebar-book-toggle {
+    width: 100%;
+    min-height: 82px;
+    padding: 7px 5px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+}
+
+.sidebar-book-toggle:hover,
+.sidebar-book-toggle:focus-visible {
+    background: #243746;
+    outline: none;
+}
+
+.sidebar-book-icon {
+    display: block;
+    font-size: 30px;
+    line-height: 1;
+}
+
+.sidebar-book-title {
+    display: block;
+    color: #fff;
+    font-size: 17px;
+    line-height: 1.1;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+body.sidebar-collapsed .sidebar-header {
+    min-height: 72px;
+    padding: 6px;
+}
+
+body.sidebar-collapsed .sidebar-book-toggle {
+    min-height: 58px;
+    padding: 5px;
+}
+
+body.sidebar-collapsed .sidebar-book-title {
+    display: none;
+}
+
+body.sidebar-collapsed .sidebar-book-icon {
+    font-size: 29px;
+}
+
+@media (max-width: 768px) {
+    body:not(.sidebar-collapsed) .sidebar-header {
+        min-height: 98px;
+        padding: 8px 5px 10px;
+        justify-content: center;
+    }
+
+    body:not(.sidebar-collapsed) .sidebar-book-toggle {
+        min-height: 78px;
+    }
+}
+
+
+/* PiBook compact mobile Status page v1 */
+.status-page {
+    min-width: 0;
+}
+
+.status-page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.status-page-header h2 {
+    flex: 1;
+    margin: 0;
+    padding-bottom: 8px;
+}
+
+.status-refresh {
+    width: 42px;
+    height: 42px;
+    min-height: 42px;
+    flex: 0 0 42px;
+    border: 0;
+    border-radius: 10px;
+    background: #4CAF50;
+    color: #fff;
+    font-size: 25px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.status-primary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.status-card {
+    min-width: 0;
+    min-height: 78px;
+    padding: 11px 12px;
+    border: 1px solid #e5e8ea;
+    border-radius: 10px;
+    background: #fafbfb;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.status-card-battery {
+    grid-column: span 2;
+    border-left: 4px solid #4CAF50;
+}
+
+.status-card-label {
+    margin-bottom: 5px;
+    color: #718087;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .055em;
+    text-transform: uppercase;
+}
+
+.status-card-value {
+    min-width: 0;
+    color: #2c3e50;
+    font-size: 17px;
+    line-height: 1.18;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.status-battery-main {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+}
+
+.status-battery-value {
+    flex: 0 0 auto;
+    color: #2c3e50;
+    font-size: 30px;
+    line-height: 1;
+    font-weight: 750;
+}
+
+.status-battery-meta {
+    min-width: 0;
+    color: #66747b;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.status-details {
+    margin-top: 12px;
+    border: 1px solid #e2e6e8;
+    border-radius: 9px;
+    background: #fff;
+}
+
+.status-details summary {
+    padding: 11px 13px;
+    color: #50616a;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+}
+
+.status-details-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    border-top: 1px solid #e7eaec;
+    background: #e7eaec;
+}
+
+.status-detail-row {
+    min-width: 0;
+    padding: 11px 12px;
+    background: #fff;
+}
+
+.status-detail-row span {
+    display: block;
+    margin-bottom: 3px;
+    color: #7a868c;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.status-detail-row strong {
+    display: block;
+    color: #33454e;
+    font-size: 13px;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+}
+
+.status-detail-wide {
+    grid-column: 1 / -1;
+}
+
+@media (max-width: 768px) {
+    .status-page-header {
+        margin-bottom: 9px;
+    }
+
+    .status-page-header h2 {
+        border-bottom-width: 2px;
+        padding-bottom: 6px;
+        font-size: 21px;
+    }
+
+    .status-refresh {
+        width: 38px;
+        height: 38px;
+        min-height: 38px;
+        flex-basis: 38px;
+        border-radius: 8px;
+        font-size: 23px;
+    }
+
+    .status-primary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 7px;
+    }
+
+    .status-card {
+        min-height: 64px;
+        padding: 8px 9px;
+        border-radius: 8px;
+    }
+
+    .status-card-battery {
+        grid-column: 1 / -1;
+        min-height: 70px;
+    }
+
+    .status-card-label {
+        margin-bottom: 3px;
+        font-size: 9px;
+    }
+
+    .status-card-value {
+        font-size: 14px;
+        line-height: 1.15;
+    }
+
+    .status-battery-main {
+        gap: 11px;
+    }
+
+    .status-battery-value {
+        font-size: 27px;
+    }
+
+    .status-battery-meta {
+        font-size: 11px;
+        line-height: 1.25;
+    }
+
+    .status-details {
+        margin-top: 8px;
+    }
+
+    .status-details summary {
+        padding: 9px 11px;
+        font-size: 12px;
+    }
+}
+
+@media (max-width: 380px) {
+    .status-card {
+        min-height: 61px;
+        padding: 7px 8px;
+    }
+
+    .status-card-value {
+        font-size: 13px;
+    }
+
+    .status-battery-value {
+        font-size: 25px;
+    }
+}
+
+
+/* Battery runtime + slightly roomier Status cards v1 */
+.status-battery-runtime {
+    margin-top: 2px;
+    color: #3f6f50;
+    font-weight: 700;
+}
+
+@media (max-width: 768px) {
+    .status-card {
+        min-height: 70px;
+    }
+
+    .status-card-battery {
+        min-height: 82px;
+    }
+}
+
+
+/* PiBook mobile Library v1 */
+.library-page {
+    min-width: 0;
+}
+
+.library-page-header {
+    margin-bottom: 14px;
+}
+
+.library-page-header h2 {
+    margin-bottom: 6px;
+}
+
+.library-page-header p {
+    color: #718087;
+    font-size: 14px;
+}
+
+.library-upload {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 9px;
+    margin-bottom: 14px;
+}
+
+.library-upload input[type="file"] {
+    min-width: 0;
+    width: 100%;
+    padding: 9px;
+    border: 1px solid #dfe4e7;
+    border-radius: 8px;
+    background: #fafbfb;
+}
+
+.library-upload .btn {
+    white-space: nowrap;
+}
+
+.library-book-list {
+    display: grid;
+    gap: 9px;
+    margin-bottom: 14px;
+}
+
+.library-book-card {
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid #e1e6e8;
+    border-radius: 10px;
+    background: #fafbfb;
+}
+
+.library-book-main {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+}
+
+.library-book-icon {
+    width: 36px;
+    flex: 0 0 36px;
+    font-size: 27px;
+    line-height: 1;
+    text-align: center;
+}
+
+.library-book-info {
+    min-width: 0;
+    flex: 1;
+}
+
+.library-book-title {
+    display: block;
+    color: #30434c;
+    font-size: 14px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.library-book-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 5px;
+    color: #7a868c;
+    font-size: 11px;
+    flex-wrap: wrap;
+}
+
+
+.library-reading-summary {
+    margin-top: 9px;
+    padding-top: 8px;
+    border-top: 1px solid #e5e9eb;
+}
+
+.library-reading-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.library-reading-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 3px 8px;
+    border: 1px solid #cfd7db;
+    border-radius: 999px;
+    color: #435760;
+    background: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.library-reading-status[data-status="reading"] {
+    border-color: #9fb4bd;
+    color: #304c58;
+}
+
+.library-reading-status[data-status="finished"] {
+    border-color: #849b8d;
+    color: #365443;
+}
+
+.library-reading-progress {
+    color: #66767d;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.library-reading-details {
+    display: flex;
+    align-items: center;
+    gap: 7px 12px;
+    margin-top: 7px;
+    color: #6f7d83;
+    font-size: 11px;
+    flex-wrap: wrap;
+}
+
+.library-rating {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    white-space: nowrap;
+}
+
+.library-rating small {
+    margin-left: 4px;
+    color: #6f7d83;
+    font-size: 10px;
+}
+
+.library-star {
+    position: relative;
+    display: inline-block;
+    width: 13px;
+    color: #394b53;
+    font-size: 14px;
+    line-height: 1;
+    text-align: center;
+}
+
+.library-star.is-empty {
+    color: #9aa5aa;
+}
+
+.library-star.is-half {
+    color: #9aa5aa;
+}
+
+.library-star.is-half::before {
+    content: "★";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 50%;
+    overflow: hidden;
+    color: #394b53;
+    white-space: nowrap;
+}
+
+.library-book-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+    margin-top: 10px;
+}
+
+.library-book-actions .btn {
+    min-width: 0;
+    padding: 9px 7px;
+    font-size: 12px;
+}
+
+.library-empty {
+    padding: 28px 18px;
+    margin-bottom: 14px;
+    text-align: center;
+    color: #758188;
+    border: 1px dashed #d6dde0;
+    border-radius: 10px;
+    background: #fafbfb;
+}
+
+.library-empty > div {
+    margin-bottom: 8px;
+    font-size: 32px;
+}
+
+.library-empty p {
+    margin: 0;
+    color: #50616a;
+    font-weight: 700;
+}
+
+.library-empty small {
+    display: block;
+    margin-top: 3px;
+}
+
+.library-panel {
+    margin-top: 9px;
+    border: 1px solid #e1e6e8;
+    border-radius: 9px;
+    background: #fff;
+}
+
+.library-panel summary {
+    padding: 11px 13px;
+    color: #435760;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+}
+
+.library-panel[open] summary {
+    border-bottom: 1px solid #e7ebed;
+}
+
+.library-panel-content {
+    padding: 12px;
+}
+
+.library-panel-help {
+    margin-bottom: 10px;
+    color: #718087;
+    font-size: 12px;
+}
+
+.library-remote-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+}
+
+.library-remote-grid .btn {
+    min-width: 0;
+    padding: 9px 6px;
+    font-size: 12px;
+}
+
+.library-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 12px;
+}
+
+.library-settings-grid .form-group {
+    margin: 8px 0;
+}
+
+.library-setting-check {
+    display: flex;
+    align-items: center;
+}
+
+.library-setting-check label {
+    margin: 0;
+}
+
+.library-settings-save {
+    grid-column: 1 / -1;
+    margin-top: 8px;
+}
+
+.library-progress-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+@media (max-width: 768px) {
+    .library-page-header {
+        margin-bottom: 10px;
+    }
+
+    .library-page-header h2 {
+        font-size: 21px;
+        margin-bottom: 3px;
+        padding-bottom: 6px;
+        border-bottom-width: 2px;
+    }
+
+    .library-page-header p {
+        font-size: 12px;
+    }
+
+    .library-upload {
+        grid-template-columns: minmax(0, 1fr) 82px;
+        gap: 7px;
+        margin-bottom: 10px;
+    }
+
+    .library-upload input[type="file"] {
+        min-height: 42px;
+        padding: 7px;
+        font-size: 12px;
+    }
+
+    .library-upload .btn {
+        min-height: 42px;
+        width: auto;
+        padding: 8px 7px;
+        margin: 0;
+        font-size: 12px;
+    }
+
+    .library-book-list {
+        gap: 7px;
+        margin-bottom: 10px;
+    }
+
+    .library-book-card {
+        padding: 9px;
+        border-radius: 8px;
+    }
+
+    .library-book-icon {
+        width: 30px;
+        flex-basis: 30px;
+        font-size: 23px;
+    }
+
+    .library-book-title {
+        font-size: 13px;
+    }
+
+    .library-book-meta {
+        margin-top: 3px;
+        font-size: 10px;
+    }
+
+    .library-book-actions {
+        gap: 5px;
+        margin-top: 8px;
+    }
+
+    .library-book-actions .btn,
+    .library-remote-grid .btn {
+        width: auto;
+        min-height: 40px;
+        margin: 0;
+        font-size: 11px;
+    }
+
+    .library-panel {
+        margin-top: 7px;
+    }
+
+    .library-panel summary {
+        padding: 10px 11px;
+        font-size: 13px;
+    }
+
+    .library-panel-content {
+        padding: 10px;
+    }
+
+    .library-settings-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .library-settings-save {
+        grid-column: auto;
+        width: 100%;
+    }
+}
+
+@media (max-width: 380px) {
+    .library-upload {
+        grid-template-columns: 1fr;
+    }
+
+    .library-upload .btn {
+        width: 100%;
+    }
+
+    .library-book-actions {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .library-action-open {
+        grid-column: 1 / -1;
+    }
+}
+
+
+/* PiBook reading progress mobile cards v1 */
+.reading-progress-list {
+    display: grid;
+    gap: 8px;
+}
+
+.reading-progress-card {
+    min-width: 0;
+    padding: 10px;
+    border: 1px solid #e1e6e8;
+    border-radius: 8px;
+    background: #fafbfb;
+}
+
+.reading-progress-top,
+.reading-progress-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.reading-progress-book {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.reading-progress-book strong {
+    min-width: 0;
+    color: #3d515a;
+    font-size: 12px;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.reading-progress-icon {
+    flex: 0 0 auto;
+    font-size: 18px;
+}
+
+.reading-progress-percent {
+    flex: 0 0 auto;
+    color: #64777f;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.reading-progress-bar {
+    height: 6px;
+    margin: 9px 0 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #e4e9eb;
+}
+
+.reading-progress-bar span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: #546e7a;
+}
+
+.reading-progress-bottom {
+    color: #758188;
+    font-size: 11px;
+}
+
+.reading-progress-reset {
+    width: auto !important;
+    min-height: 32px !important;
+    margin: 0 !important;
+    padding: 5px 10px !important;
+    font-size: 10px !important;
+}
+
+
+/* PiBook mobile Settings v1 */
+#settings {
+    min-width: 0;
+}
+
+#settings .library-panel-content .form-group {
+    margin: 9px 0;
+}
+
+#settings input[type="number"],
+#settings input[type="text"],
+#settings select {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+#settings #settings-form > button[type="submit"] {
+    width: 100%;
+    margin-top: 10px;
+}
+
+@media (max-width: 768px) {
+    #settings > h2 {
+        font-size: 21px;
+        margin-bottom: 10px;
+        padding-bottom: 6px;
+        border-bottom-width: 2px;
+    }
+
+    #settings .library-panel {
+        margin-top: 7px;
+    }
+
+    #settings .library-panel summary {
+        padding: 10px 11px;
+        font-size: 13px;
+    }
+
+    #settings .library-panel-content {
+        padding: 10px;
+    }
+
+    #settings .library-panel-content .form-group {
+        margin: 7px 0;
+    }
+
+    #settings label {
+        font-size: 12px;
+    }
+
+    #settings input[type="number"],
+    #settings input[type="text"],
+    #settings select {
+        min-height: 40px;
+        font-size: 13px;
+    }
+
+    #settings .help-text {
+        margin-top: 3px;
+        font-size: 10px;
+        line-height: 1.3;
+    }
+
+    #settings .library-settings-save {
+        width: 100%;
+    }
+}
+
+
+/* PiBook settings feedback top v1 */
+#settings-message {
+    margin: 0 0 14px !important;
+}
+
+#settings-form .saved-field-group {
+    padding: 8px;
+    border: 2px solid #73bd79;
+    border-radius: 10px;
+    background: #eef8ef;
+}
+
+#settings-form .saved-field-group label {
+    font-weight: 700;
+}
+
+#settings-form .saved-field-group input[type="number"],
+#settings-form .saved-field-group input[type="text"],
+#settings-form .saved-field-group select {
+    border-color: #73bd79 !important;
+    box-shadow: 0 0 0 2px rgba(115, 189, 121, 0.12);
+}
+
+#settings-form .saved-field-group .help-text:last-child {
+    margin-bottom: 0;
+}
+
+.library-book-actions.has-lifecycle-action {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+
+/* PiBook Remote v2 - display preview */
+.remote-page {
+    min-width: 0;
+}
+
+.remote-preview-panel {
+    margin-top: 0;
+}
+
+.remote-controls-panel {
+    margin-top: 12px;
+}
+
+.remote-panel-title {
+    margin: 0 0 11px;
+    color: #435760;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.remote-preview-frame {
+    width: min(100%, 300px);
+    margin: 0 auto;
+    padding: 8px;
+    border: 1px solid #d8dfe2;
+    border-radius: 10px;
+    background: #f5f7f7;
+}
+
+.remote-preview-image {
+    display: block;
+    width: 100%;
+    aspect-ratio: 3 / 5;
+    object-fit: contain;
+    border: 1px solid #cbd3d7;
+    background: #fff;
+}
+
+.remote-preview-image.is-loading {
+    opacity: 0.72;
+}
+
+.remote-preview-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.remote-preview-help {
+    min-width: 0;
+    color: #718087;
+    font-size: 11px;
+    line-height: 1.3;
+}
+
+.remote-refresh-btn {
+    flex: 0 0 auto;
+    margin: 0;
+    white-space: nowrap;
+}
+
+.remote-status {
+    margin-top: 10px;
+    margin-bottom: 0;
+}
+
+@media (max-width: 768px) {
+    .remote-preview-frame {
+        width: min(100%, 260px);
+        padding: 6px;
+    }
+
+    .remote-panel-title {
+        margin-bottom: 9px;
+        font-size: 14px;
+    }
+
+    .remote-preview-footer {
+        gap: 8px;
+    }
+
+    .remote-refresh-btn {
+        width: auto;
+        min-height: 40px;
+        padding: 8px 11px;
+        font-size: 11px;
+    }
+}
+
+
+/* PiBook Remote v2 - direct menu actions */
+.remote-direct-panel {
+    margin-top: 12px;
+}
+
+.remote-direct-help {
+    margin: -3px 0 10px;
+    color: #718087;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.remote-direct-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+}
+
+.remote-direct-grid .btn {
+    min-width: 0;
+    min-height: 42px;
+    margin: 0;
+    padding: 9px 6px;
+    font-size: 12px;
+}
+
+@media (max-width: 768px) {
+    .remote-direct-panel {
+        margin-top: 9px;
+    }
+
+    .remote-direct-help {
+        margin-bottom: 8px;
+        font-size: 11px;
+    }
+
+    .remote-direct-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+    }
+
+    .remote-direct-grid .btn {
+        width: auto;
+        min-height: 42px;
+        font-size: 11px;
+    }
+}
+
+/* PiBook Remote v20 - controls, cards and preview switch */
+.remote-panel-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 11px;
+}
+
+.remote-panel-heading .remote-panel-title {
+    margin: 0;
+}
+
+.remote-preview-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: #64747b;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.remote-preview-switch input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.remote-preview-slider {
+    position: relative;
+    width: 38px;
+    height: 21px;
+    border: 1px solid #bdc8cd;
+    border-radius: 999px;
+    background: #e8ecee;
+    transition: 0.15s ease;
+}
+
+.remote-preview-slider::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,.18);
+    transition: 0.15s ease;
+}
+
+.remote-preview-switch input:checked + .remote-preview-slider {
+    background: #5f7769;
+    border-color: #5f7769;
+}
+
+.remote-preview-switch input:checked + .remote-preview-slider::after {
+    transform: translateX(17px);
+}
+
+.remote-preview-off {
+    width: min(100%, 260px);
+    margin: 18px auto;
+    padding: 34px 12px;
+    border: 1px dashed #ccd4d8;
+    border-radius: 10px;
+    color: #7a878d;
+    background: #fafbfb;
+    text-align: center;
+    font-size: 12px;
+}
+
+.remote-nav-pad {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.remote-control-btn {
+    min-width: 0;
+    min-height: 44px;
+    padding: 9px 7px;
+    border: 1px solid #cfd7db;
+    border-radius: 9px;
+    background: #fff;
+    color: #3d5059;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.remote-control-btn:active {
+    background: #eef2f3;
+    transform: translateY(1px);
+}
+
+.remote-prev {
+    grid-column: 1 / 3;
+}
+
+.remote-select {
+    grid-column: 3 / 5;
+    border: 2px solid #788e83;
+    background: #f6f8f7;
+}
+
+.remote-next {
+    grid-column: 5 / 7;
+}
+
+.remote-back {
+    grid-column: 2 / 4;
+}
+
+.remote-menu {
+    grid-column: 4 / 6;
+}
+
+.remote-direct-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.remote-app-card {
+    min-width: 0;
+    min-height: 72px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 9px;
+    border: 1px solid #d5dcdf;
+    border-radius: 10px;
+    background: #fff;
+    color: #3d5059;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.remote-app-card:active {
+    background: #f3f5f5;
+    transform: translateY(1px);
+}
+
+.remote-app-icon {
+    font-size: 21px;
+    line-height: 1;
+}
+
+.remote-app-shutdown {
+    border-color: #cda9a9;
+    color: #984747;
+    background: #fffafa;
+}
+
+@media (max-width: 768px) {
+    .remote-nav-pad {
+        gap: 6px;
+    }
+
+    .remote-control-btn {
+        min-height: 42px;
+        padding: 8px 5px;
+        font-size: 11px;
+    }
+
+    .remote-direct-grid {
+        gap: 7px;
+    }
+
+    .remote-app-card {
+        min-height: 68px;
+        font-size: 11px;
+    }
+
+    .remote-app-icon {
+        font-size: 20px;
+    }
+}
+
+/* PiBook To Do v2 */
+.todo-page {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+.todo-page-header {
+    margin-bottom: 0;
+}
+
+.todo-page-header p {
+    margin-bottom: 0;
+}
+
+.todo-open-epaper {
+    white-space: nowrap;
+}
+
+.todo-status {
+    margin: 0;
+}
+
+.todo-panel-title {
+    margin: 0 0 16px;
+}
+
+.todo-add-form {
+    display: flex;
+    align-items: stretch;
+    gap: 12px;
+}
+
+.todo-new-input,
+.todo-edit-input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 11px 12px;
+    font: inherit;
+    background: #fff;
+    border: 1px solid #cfcfcf;
+    border-radius: 7px;
+}
+
+.todo-new-input:focus,
+.todo-edit-input:focus {
+    border-color: #666;
+    outline: 2px solid rgba(0, 0, 0, 0.08);
+    outline-offset: 1px;
+}
+
+.todo-add-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.todo-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.todo-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px;
+    background: #fafafa;
+    border: 1px solid #e2e2e2;
+    border-radius: 9px;
+}
+
+.todo-check {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+}
+
+.todo-check input {
+    width: 21px;
+    height: 21px;
+    margin: 0;
+    cursor: pointer;
+}
+
+.todo-item-content {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.todo-item-text {
+    display: block;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+}
+
+.todo-item.is-completed .todo-item-text {
+    color: #888;
+    text-decoration: line-through;
+}
+
+.todo-item-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 8px;
+}
+
+.todo-item-actions .btn {
+    width: auto;
+    white-space: nowrap;
+}
+
+.todo-edit-input {
+    display: block;
+}
+
+/* Hidden edit controls must stay hidden until Editar is selected. */
+.todo-item [hidden] {
+    display: none !important;
+}
+
+.todo-empty {
+    display: flex;
+    min-height: 110px;
+    padding: 20px;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 5px;
+    color: #777;
+    text-align: center;
+}
+
+.todo-empty-icon {
+    font-size: 28px;
+    line-height: 1;
+    margin-bottom: 4px;
+}
+
+.todo-error {
+    color: #b42318;
+}
+
+@media (max-width: 700px) {
+    .todo-page {
+        gap: 14px;
+    }
+
+    .todo-page-header {
+        align-items: stretch;
+        gap: 12px;
+    }
+
+    .todo-open-epaper {
+        width: 100%;
+    }
+
+    .todo-add-form {
+        flex-direction: column;
+    }
+
+    .todo-add-btn {
+        width: 100%;
+    }
+
+    .todo-item {
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr);
+        column-gap: 12px;
+        row-gap: 10px;
+        align-items: center;
+        padding: 12px;
+    }
+
+    .todo-check {
+        grid-column: 1;
+        grid-row: 1;
+        padding-top: 0;
+        align-self: center;
+    }
+
+    .todo-item-content {
+        grid-column: 2;
+        grid-row: 1;
+        min-width: 0;
+    }
+
+    .todo-item-actions {
+        grid-column: 2;
+        grid-row: 2;
+        width: 100%;
+        margin: 0;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .todo-item-actions .btn {
+        width: 100%;
+    }
+}
+
+
+/* IP Scanner v2 — dispositivos locais mobile */
+.network-scan-status {
+    margin: 14px 0 18px;
+    padding: 12px 14px;
+    border: 1px solid #dbe2e6;
+    border-radius: 9px;
+    background: #f7f9fa;
+    color: #59656c;
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.network-scan-status.is-success {
+    border-color: #d7e8dc;
+    background: #f3f8f4;
+    color: #3e6048;
+}
+
+.network-scan-status.is-error {
+    border-color: #ecd4d4;
+    background: #fdf6f6;
+    color: #8a4646;
+}
+
+.network-device-list {
+    display: grid;
+    gap: 10px;
+}
+
+.network-device-card {
+    min-width: 0;
+    padding: 14px 16px;
+    border: 1px solid #e1e6e9;
+    border-radius: 10px;
+    background: #fafbfb;
+}
+
+.network-device-ip {
+    display: block;
+    margin-bottom: 9px;
+    color: #263940;
+    font-size: 16px;
+}
+
+.network-device-detail {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    margin-top: 5px;
+    font-size: 13px;
+}
+
+.network-device-label {
+    flex: 0 0 auto;
+    color: #89939a;
+}
+
+.network-device-value {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: #56636a;
+}
+
+@media (max-width: 768px) {
+    .network-local-panel .network-panel-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+
+    .network-local-panel #scan-btn {
+        width: 100%;
+        margin: 0;
+    }
+
+    .network-local-panel .network-inline-status {
+        line-height: 1.45;
+    }
+
+    .network-device-heading {
+        margin-top: 18px;
+    }
+
+    .network-device-card {
+        padding: 13px 14px;
+        border-radius: 9px;
+    }
+
+    .network-device-ip {
+        font-size: 15px;
+    }
+
+    .network-device-detail {
+        justify-content: space-between;
+        gap: 14px;
+    }
+
+    .network-device-value {
+        text-align: right;
+    }
+}
+
+/* PiBook Wi-Fi e rede — mobile final v1 */
+@media (max-width: 768px) {
+
+    /* ---------------------------------------------------------
+       Estrutura geral
+       --------------------------------------------------------- */
+    .network-page {
+        gap: 12px;
+    }
+
+    .network-heading {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+        gap: 8px 12px;
+    }
+
+    .network-heading h2 {
+        margin-bottom: 4px;
+    }
+
+    .network-heading p {
+        font-size: 13px;
+        line-height: 1.4;
+    }
+
+    .network-refresh-button {
+        width: auto;
+        min-height: 42px;
+        margin: 0;
+        padding: 9px 13px;
+        white-space: nowrap;
+    }
+
+    .network-panel {
+        padding: 14px;
+        border-radius: 10px;
+    }
+
+    .network-panel h3 {
+        margin-bottom: 3px;
+        font-size: 18px;
+    }
+
+    .network-panel-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+        gap: 8px 12px;
+        margin-bottom: 12px;
+    }
+
+    .network-panel-header > .btn {
+        width: auto;
+        min-height: 42px;
+        margin: 0;
+        padding: 9px 13px;
+        white-space: nowrap;
+    }
+
+
+    /* ---------------------------------------------------------
+       Estado da ligação
+       --------------------------------------------------------- */
+    .network-status-panel .network-panel-header {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .network-mode-badge {
+        min-width: 0;
+        padding: 6px 11px;
+    }
+
+    .network-status-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0;
+        border-top: 1px solid #e3e8e5;
+    }
+
+    .network-status-item {
+        display: grid;
+        grid-template-columns: minmax(105px, 42%) minmax(0, 1fr);
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+        padding: 9px 0;
+        border: 0;
+        border-bottom: 1px solid #e3e8e5;
+        border-radius: 0;
+        background: transparent;
+    }
+
+    .network-status-item strong {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.35;
+        text-align: right;
+    }
+
+    .network-status-label {
+        font-size: 11px;
+        line-height: 1.3;
+    }
+
+    .network-action-row {
+        margin-top: 12px;
+        gap: 8px;
+    }
+
+    .network-action-row .btn {
+        width: auto;
+        min-height: 42px;
+        margin: 0;
+        padding: 9px 13px;
+    }
+
+    .network-help {
+        margin-top: 10px;
+        font-size: 13px;
+        line-height: 1.4;
+    }
+
+
+    /* ---------------------------------------------------------
+       Pesquisa Wi-Fi
+       --------------------------------------------------------- */
+    .network-inline-status {
+        margin-bottom: 10px;
+        padding: 9px 11px;
+        font-size: 13px;
+        line-height: 1.4;
+    }
+
+    .wifi-network-list,
+    .saved-profile-list {
+        gap: 8px;
+    }
+
+    .wifi-network-card {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        padding: 11px 12px;
+        border-radius: 9px;
+    }
+
+    .wifi-network-title-row {
+        gap: 6px;
+    }
+
+    .wifi-network-name {
+        font-size: 15px;
+    }
+
+    .wifi-security-badge {
+        padding: 4px 7px;
+        font-size: 10px;
+    }
+
+    .wifi-network-details {
+        margin-top: 3px;
+        font-size: 12px;
+        line-height: 1.35;
+    }
+
+    .network-page .wifi-connect-button {
+        width: auto;
+        min-width: 68px;
+        min-height: 42px;
+        margin: 0;
+        padding: 9px 13px;
+    }
+
+
+    /* ---------------------------------------------------------
+       Formulário manual
+       --------------------------------------------------------- */
+    .network-form-grid {
+        gap: 11px;
+    }
+
+    .network-form .btn {
+        min-height: 44px;
+    }
+
+    .network-checkbox-field {
+        padding-bottom: 0;
+    }
+
+
+    /* ---------------------------------------------------------
+       Redes guardadas
+       --------------------------------------------------------- */
+    .saved-profile-card {
+        display: grid;
+        grid-template-columns: 1fr;
+        align-items: stretch;
+        gap: 9px;
+        padding: 11px 12px;
+        border-radius: 9px;
+    }
+
+    .saved-profile-title {
+        gap: 6px;
+    }
+
+    .saved-profile-meta {
+        margin-top: 3px;
+        font-size: 12px;
+    }
+
+    .saved-profile-active {
+        padding: 4px 7px;
+        font-size: 10px;
+    }
+
+    .saved-profile-actions {
+        display: flex;
+        width: auto;
+        gap: 8px;
+    }
+
+    .saved-profile-actions .btn {
+        flex: 1 1 0;
+        width: auto;
+        min-height: 40px;
+        margin: 0;
+        padding: 8px 12px;
+    }
+
+
+    /* ---------------------------------------------------------
+       Dispositivos na rede local
+       --------------------------------------------------------- */
+    .network-local-panel .network-panel-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+        gap: 8px 12px;
+    }
+
+    .network-local-panel #scan-btn {
+        width: auto;
+        min-height: 42px;
+        margin: 0;
+        padding: 9px 13px;
+        white-space: nowrap;
+    }
+
+    .network-scan-status {
+        margin: 10px 0 12px;
+        padding: 9px 11px;
+        font-size: 13px;
+    }
+
+    .network-device-heading {
+        margin-top: 12px;
+    }
+
+    .network-device-card {
+        padding: 11px 12px;
+        border-radius: 9px;
+    }
+
+    .network-device-ip {
+        margin-bottom: 5px;
+        font-size: 14px;
+    }
+
+    .network-device-detail {
+        margin-top: 3px;
+        font-size: 12px;
+    }
+}
+
+
+/* Telefones realmente estreitos */
+@media (max-width: 390px) {
+    .network-heading {
+        grid-template-columns: 1fr;
+    }
+
+    .network-refresh-button {
+        justify-self: start;
+    }
+
+    .network-panel-header,
+    .network-local-panel .network-panel-header {
+        grid-template-columns: 1fr;
+    }
+
+    .network-panel-header > .btn,
+    .network-local-panel #scan-btn {
+        width: 100%;
+    }
+
+    .network-status-item {
+        grid-template-columns: minmax(95px, 42%) minmax(0, 1fr);
+    }
+}
+
+/* PiBook Wi-Fi e rede — mobile final v2 */
+
+/* hidden tem sempre prioridade sobre estilos de botões/flex/grid */
+.network-page [hidden] {
+    display: none !important;
+}
+
+@media (max-width: 768px) {
+
+    /* ---------------------------------------------------------
+       Cabeçalho
+       --------------------------------------------------------- */
+    .network-heading {
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+    }
+
+    .network-heading h2 {
+        white-space: nowrap;
+        font-size: 21px;
+    }
+
+    .network-refresh-button {
+        min-height: 40px;
+        padding: 8px 12px;
+        font-size: 13px;
+    }
+
+
+    /* ---------------------------------------------------------
+       Cabeçalhos dos painéis com ação
+       O botão fica por baixo e não comprime a descrição.
+       --------------------------------------------------------- */
+    .network-panel-header {
+        grid-template-columns: 1fr;
+        gap: 9px;
+    }
+
+    .network-panel-header > .btn {
+        justify-self: start;
+        width: auto;
+        min-height: 40px;
+        padding: 8px 13px;
+        font-size: 13px;
+    }
+
+    .network-panel-header p {
+        max-width: none;
+        font-size: 12.5px;
+        line-height: 1.4;
+    }
+
+
+    /* Estado mantém badge na mesma linha */
+    .network-status-panel .network-panel-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+    }
+
+    .network-status-panel .network-panel-header p {
+        padding-right: 4px;
+    }
+
+
+    /* ---------------------------------------------------------
+       Ações de modo
+       --------------------------------------------------------- */
+    .network-action-row {
+        gap: 7px;
+    }
+
+    .network-action-row .btn {
+        min-height: 40px;
+        padding: 8px 12px;
+        font-size: 13px;
+    }
+
+
+    /* ---------------------------------------------------------
+       Redes próximas
+       --------------------------------------------------------- */
+    .wifi-network-card {
+        padding: 10px 11px;
+    }
+
+    .wifi-network-details {
+        font-size: 11.5px;
+    }
+
+    .network-page .wifi-connect-button {
+        min-width: 62px;
+        min-height: 38px;
+        padding: 7px 11px;
+        font-size: 13px;
+    }
+
+
+    /* ---------------------------------------------------------
+       Formulário manual
+       --------------------------------------------------------- */
+    .network-form-grid {
+        gap: 9px;
+    }
+
+    .network-form .form-group label {
+        margin-bottom: 4px;
+    }
+
+    .network-form > .btn {
+        margin-top: 12px;
+    }
+
+
+    /* ---------------------------------------------------------
+       Redes guardadas
+       --------------------------------------------------------- */
+    .saved-profile-card {
+        gap: 7px;
+        padding: 10px 11px;
+    }
+
+    .saved-profile-actions {
+        justify-content: flex-start;
+    }
+
+    .saved-profile-actions .btn {
+        flex: 0 0 auto;
+        min-width: 78px;
+        min-height: 38px;
+        padding: 7px 12px;
+        font-size: 13px;
+    }
+
+
+    /* ---------------------------------------------------------
+       Dispositivos locais
+       --------------------------------------------------------- */
+    .network-local-panel .network-panel-header {
+        grid-template-columns: 1fr;
+        gap: 9px;
+    }
+
+    .network-local-panel #scan-btn {
+        justify-self: start;
+        width: auto;
+        min-height: 40px;
+        padding: 8px 13px;
+        font-size: 13px;
+    }
+
+    .network-device-heading {
+        margin-top: 10px;
+    }
+
+    .network-empty {
+        padding: 16px 12px;
+        font-size: 12.5px;
+    }
+}
+
+@media (max-width: 390px) {
+    .network-heading {
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .network-heading h2 {
+        font-size: 19px;
+    }
+
+    .network-refresh-button {
+        justify-self: end;
+    }
+
+    .network-panel-header > .btn,
+    .network-local-panel #scan-btn {
+        width: auto;
+    }
+}
+
+/* PiBook Wi-Fi e rede — collapsible panels v3 */
+
+.network-collapsible-content {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #e3e8e5;
+}
+
+@media (max-width: 768px) {
+    .network-collapsible-panel .network-panel-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 0;
+    }
+
+    .network-collapsible-panel .network-panel-header > .btn {
+        justify-self: end;
+        width: auto;
+        min-width: 72px;
+        min-height: 38px;
+        margin: 0;
+        padding: 7px 11px;
+        font-size: 12.5px;
+    }
+
+    .network-collapsible-panel .network-panel-header p {
+        margin-bottom: 0;
+    }
+
+    .network-collapsible-content {
+        margin-top: 12px;
+        padding-top: 12px;
+    }
+}
+
+@media (max-width: 390px) {
+    .network-collapsible-panel .network-panel-header {
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .network-collapsible-panel .network-panel-header > .btn {
+        width: auto;
+    }
+}
+
+/* Biblioteca: seleção e carregamento EPUB */
+.library-upload {
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.library-file-select {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    min-height: 42px;
+    cursor: pointer;
+    text-align: center;
+}
+
+@media (max-width: 380px) {
+    .library-upload {
+        grid-template-columns: 1fr;
+    }
+
+    .library-file-select,
+    .library-upload .btn {
+        width: 100%;
+    }
+}
+
+.library-upload-selection {
+    grid-column: 1 / -1;
+    min-height: 18px;
+    margin-top: -2px;
+    color: #718087;
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.library-file-select {
+    box-sizing: border-box;
+    justify-content: center;
+    text-align: center;
+}
+
+/* Power Profiles v2 */
+#settings .power-profile-card {
+    margin: 12px 0;
+    padding: 12px;
+    border: 1px solid #e1e6e8;
+    border-radius: 9px;
+    background: #f8fafb;
+}
+
+#settings .power-profile-card h4 {
+    margin: 0 0 10px;
+    color: #435760;
+    font-size: 14px;
+}
+
+#settings .power-profile-card .form-group:first-of-type {
+    margin-top: 0;
+}
+
+#settings .power-profile-card .form-group:last-child {
+    margin-bottom: 0;
+}
+
+#settings #auto-power-options {
+    margin: 10px 0 14px;
+    padding: 10px 12px;
+    border-left: 3px solid #d8dfe2;
+    background: #f8fafb;
+}
+
+@media (max-width: 768px) {
+    #settings .power-profile-card {
+        margin: 10px 0;
+        padding: 10px;
+    }
+
+    #settings .power-profile-card h4 {
+        margin-bottom: 8px;
+        font-size: 13px;
+    }
+
+    #settings #auto-power-options {
+        margin: 8px 0 12px;
+        padding: 9px 10px;
+    }
+}
+
+/* Power Profiles v2 - collapsible cards */
+#settings .power-profile-card {
+    padding: 0;
+    overflow: hidden;
+}
+
+#settings .power-profile-card > summary {
+    padding: 11px 12px;
+    color: #435760;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+}
+
+#settings .power-profile-card[open] > summary {
+    border-bottom: 1px solid #e1e6e8;
+}
+
+#settings .power-profile-card-content {
+    padding: 10px 12px 12px;
+}
+
+@media (max-width: 768px) {
+    #settings .power-profile-card > summary {
+        padding: 10px;
+        font-size: 13px;
+    }
+
+    #settings .power-profile-card-content {
+        padding: 8px 10px 10px;
+    }
+}
+
+#settings .power-profile-card:not([open]) .power-profile-card-content {
+    display: none;
+}
+
+#settings .power-profile-card > summary::before {
+    content: "▶";
+    display: inline-block;
+    margin-right: 7px;
+    font-size: 10px;
+}
+
+#settings .power-profile-card[open] > summary::before {
+    content: "▼";
+}
+
+#settings .power-profile-card > summary::before {
+    content: none;
+    display: none;
+}

@@ -5,14 +5,116 @@
 case "$1" in
     power_on)
         echo "Powering on Bluetooth..."
-        rfkill unblock bluetooth 2>&1
+
+        cleanup_failed_on() {
+            rfkill block bluetooth >/dev/null 2>&1 || true
+            systemctl stop bluetooth.service >/dev/null 2>&1 || true
+            modprobe -r hci_uart >/dev/null 2>&1 || true
+        }
+
+        # Bluetooth hardware is lazy-loaded on PiBook.
+        if ! modprobe hci_uart 2>&1; then
+            echo "ERROR: could not load hci_uart" >&2
+            exit 1
+        fi
+
+        # hci0 appears before the Broadcom firmware has completely settled.
+        HCI_READY=0
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if [ -e /sys/class/bluetooth/hci0 ]; then
+                HCI_READY=1
+                break
+            fi
+            sleep 0.25
+        done
+
+        if [ "$HCI_READY" -ne 1 ]; then
+            echo "ERROR: hci0 did not appear" >&2
+            cleanup_failed_on
+            exit 1
+        fi
+
+        # On the Pi Zero W the firmware finishes shortly after hci0 appears.
+        # Let it settle before BlueZ tries to manage the controller.
+        sleep 1.5
+
+        if ! rfkill unblock bluetooth 2>&1; then
+            echo "ERROR: rfkill unblock failed" >&2
+            cleanup_failed_on
+            exit 1
+        fi
+
+        if ! systemctl start bluetooth.service 2>&1; then
+            echo "ERROR: could not start bluetooth.service" >&2
+            cleanup_failed_on
+            exit 1
+        fi
+
+        # Do not equate "service active" with "controller ready".
+        # Wait until BlueZ actually exposes a Controller object.
+        CONTROLLER_READY=0
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if timeout 2 bluetoothctl list 2>/dev/null |
+                 grep -q '^Controller '; then
+                CONTROLLER_READY=1
+                break
+            fi
+            sleep 0.25
+        done
+
+        if [ "$CONTROLLER_READY" -ne 1 ]; then
+            echo "ERROR: BlueZ controller did not become ready" >&2
+            cleanup_failed_on
+            exit 1
+        fi
+
+        if ! timeout 5 bluetoothctl power on 2>&1; then
+            echo "ERROR: bluetoothctl power on failed" >&2
+            cleanup_failed_on
+            exit 1
+        fi
+
+        if ! rfkill list bluetooth 2>/dev/null |
+             grep -q "Soft blocked: no"; then
+            echo "ERROR: Bluetooth remains soft-blocked" >&2
+            cleanup_failed_on
+            exit 1
+        fi
+
         echo "Bluetooth powered on"
         ;;
+
     power_off)
         echo "Powering off Bluetooth..."
-        rfkill block bluetooth 2>&1
+
+        # Already fully off is a valid idempotent state.
+        if [ ! -e /sys/class/bluetooth/hci0 ] &&
+           ! lsmod | grep -q '^hci_uart '; then
+            systemctl stop bluetooth.service >/dev/null 2>&1 || true
+            echo "Bluetooth already powered off"
+            exit 0
+        fi
+
+        if systemctl is-active --quiet bluetooth.service; then
+            timeout 3 bluetoothctl power off >/dev/null 2>&1 || true
+        fi
+
+        rfkill block bluetooth >/dev/null 2>&1 || true
+        systemctl stop bluetooth.service >/dev/null 2>&1 || true
+
+        if ! modprobe -r hci_uart 2>&1; then
+            echo "ERROR: could not unload hci_uart" >&2
+            exit 1
+        fi
+
+        if [ -e /sys/class/bluetooth/hci0 ]; then
+            echo "ERROR: hci0 remains present after power off" >&2
+            exit 1
+        fi
+
         echo "Bluetooth powered off"
         ;;
+
     scan_on)
         echo "Starting Bluetooth scan..."
         # Kill any existing scan processes first

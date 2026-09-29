@@ -1,0 +1,143 @@
+<div class="remote-page">
+    <div class="library-page-header">
+        <h2>🎮 Controlo remoto</h2>
+        <p>Controla diretamente o e-paper do PiBook.</p>
+    </div>
+
+    <div class="library-panel remote-preview-panel">
+        <div class="library-panel-content">
+            <div class="remote-panel-heading">
+                <h3 class="remote-panel-title">Ecrã atual</h3>
+
+                <label class="remote-preview-switch">
+                    <input
+                        type="checkbox"
+                        id="remote-preview-toggle"
+                        onchange="setRemotePreviewEnabled(this.checked)"
+                    >
+                    <span class="remote-preview-slider"></span>
+                    <span id="remote-preview-toggle-label">ON</span>
+                </label>
+            </div>
+
+            <div
+                id="remote-preview-container"
+                class="remote-preview-frame"
+            >
+                <img
+                    id="remote-display-preview"
+                    class="remote-preview-image"
+                    alt="Visualização atual do e-paper"
+                >
+            </div>
+
+            <div
+                id="remote-preview-off"
+                class="remote-preview-off"
+                hidden
+            >
+                Preview desligada
+            </div>
+
+            <div class="remote-preview-footer">
+                <span
+                    id="remote-preview-help"
+                    class="remote-preview-help"
+                >
+                    Último frame apresentado no e-paper
+                </span>
+
+                <button
+                    id="remote-preview-refresh"
+                    class="btn btn-secondary remote-refresh-btn"
+                    onclick="refreshRemoteView()"
+                >
+                    ↻ Atualizar
+                </button>
+            </div>
+
+            <div
+                id="remote-status"
+                class="message remote-status"
+                style="display:none;"
+            ></div>
+        </div>
+    </div>
+
+    <div class="library-panel remote-controls-panel">
+        <div class="library-panel-content">
+            <h3 class="remote-panel-title">Controlos de navegação</h3>
+
+            <div class="remote-nav-pad">
+                <button class="remote-control-btn remote-prev"
+                        onclick="sendCommand('prev')">
+                    ◀ Anterior
+                </button>
+
+                <button class="remote-control-btn remote-select"
+                        onclick="sendCommand('select')">
+                    ✓ Selecionar
+                </button>
+
+                <button class="remote-control-btn remote-next"
+                        onclick="sendCommand('next')">
+                    Seguinte ▶
+                </button>
+
+                <button class="remote-control-btn remote-back"
+                        onclick="sendCommand('back')">
+                    ← Voltar
+                </button>
+
+                <button class="remote-control-btn remote-menu"
+                        onclick="sendCommand('menu')">
+                    ≡ Menu
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="library-panel remote-direct-panel">
+        <div class="library-panel-content">
+            <h3 class="remote-panel-title">Abrir diretamente</h3>
+
+            <div class="remote-direct-grid">
+                <button class="remote-app-card"
+                        onclick="openMenuAppDirect('library', 'Livros')">
+                    <span class="remote-app-icon">📚</span>
+                    <span>Livros</span>
+                </button>
+
+                <button class="remote-app-card"
+                        onclick="openMenuAppDirect('continue', 'Continuar')">
+                    <span class="remote-app-icon">▶</span>
+                    <span>Continuar</span>
+                </button>
+
+                <button class="remote-app-card"
+                        onclick="openMenuAppDirect('wifi', 'Wi-Fi')">
+                    <span class="remote-app-icon">📶</span>
+                    <span>Wi-Fi</span>
+                </button>
+
+                <button class="remote-app-card"
+                        onclick="openMenuAppDirect('todo', 'To Do')">
+                    <span class="remote-app-icon">✓</span>
+                    <span>To Do</span>
+                </button>
+
+                <button class="remote-app-card"
+                        onclick="openMenuAppDirect('typewriter', 'Terminal')">
+                    <span class="remote-app-icon">&gt;_</span>
+                    <span>Terminal</span>
+                </button>
+
+                <button class="remote-app-card remote-app-shutdown"
+                        onclick="openMenuAppDirect('shutdown', 'Shutdown')">
+                    <span class="remote-app-icon">🛑</span>
+                    <span>Shutdown</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,17 @@
+[Unit]
+Description=PiBook network watchdog check
+After=pibook-network-startup.service pibook-zero.service
+ConditionPathExists=/usr/local/sbin/pibook-network-watchdog
+ConditionPathExists=/etc/pibook-network/watchdog.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pibook-network-watchdog check
+TimeoutStartSec=4min
+RuntimeDirectory=pibook-network
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StateDirectory=pibook-network
+StateDirectoryMode=0700
+StandardOutput=journal
+StandardError=journal

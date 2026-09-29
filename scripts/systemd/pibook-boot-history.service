@@ -1,0 +1,14 @@
+[Unit]
+Description=PiBook Boot History - archive current boot on shutdown
+After=systemd-journald.service local-fs.target
+ConditionPathIsDirectory=/home/pi/PiBook
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+ExecStop=/usr/local/sbin/pibook-archive-boot
+TimeoutStopSec=8
+
+[Install]
+WantedBy=multi-user.target

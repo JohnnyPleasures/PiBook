@@ -1,0 +1,31 @@
+[Unit]
+Description=PiBook captive portal HTTP redirect
+After=pibook-network-hostapd.service
+Before=pibook-network-dnsmasq.service
+PartOf=pibook-network-dnsmasq.service
+ConditionPathExists=/usr/local/sbin/pibook-captive-portal
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/pibook-captive-portal --listen 0.0.0.0 --port 80 --target http://10.42.0.1:5000/
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=20
+TimeoutStopSec=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

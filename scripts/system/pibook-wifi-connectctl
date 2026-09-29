@@ -1,0 +1,1618 @@
+#!/usr/bin/env python3
+"""Ligação controlada do PiBook a uma rede Wi-Fi externa.
+
+O comando start guarda o pedido de forma privada e inicia um worker
+systemd assíncrono. A ligação ao hotspot cai durante a tentativa.
+Em caso de falha, o hotspot WPA2 e o portal cativo são restaurados.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import ipaddress
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import secrets
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any, Iterable, Optional
+
+CONFIG_PATH = Path("/etc/pibook-network/config.json")
+STATE_PATH = Path("/var/lib/pibook-network/state.json")
+REQUEST_PATH = Path("/var/lib/pibook-network/connect_request.json")
+RESULT_PATH = Path("/var/lib/pibook-network/connect_result.json")
+WEB_STATE_PATH = Path("/var/lib/pibook-network-web/state.json")
+WEB_RESULT_PATH = Path("/var/lib/pibook-network-web/connect_result.json")
+PROFILES_CACHE_PATH = Path("/var/lib/pibook-network-web/profiles.json")
+LOCK_PATH = Path("/run/lock/pibook-network.lock")
+LOG_PATH = Path("/var/log/pibook-wifi-connect.log")
+
+CONNECT_SERVICE = "pibook-wifi-connect.service"
+RECOVERY_UNIT = "pibook-wifi-connect-recovery"
+TEST_RESTORE_UNIT = "pibook-network-test-restore"
+SCAN_RECOVERY_UNIT = "pibook-wifi-scan-recovery"
+SCAN_SERVICE = "pibook-wifi-scan.service"
+
+HOSTAPD_SERVICE = "pibook-network-hostapd.service"
+DNSMASQ_SERVICE = "pibook-network-dnsmasq.service"
+CAPTIVE_SERVICE = "pibook-network-captive.service"
+
+
+class ConnectError(RuntimeError):
+    pass
+
+
+def now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(
+        timespec="seconds"
+    )
+
+
+def setup_logging() -> logging.Logger:
+    logger = logging.getLogger("pibook-wifi-connect")
+    logger.setLevel(logging.INFO)
+
+    if not logger.handlers:
+        formatter = logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s"
+        )
+        try:
+            handler: logging.Handler = logging.FileHandler(LOG_PATH)
+        except OSError:
+            handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
+
+
+LOGGER = setup_logging()
+
+
+def run(
+    command: Iterable[str],
+    *,
+    check: bool = True,
+    timeout: int = 60,
+    display_command: Optional[Iterable[str]] = None,
+) -> subprocess.CompletedProcess[str]:
+    args = [str(part) for part in command]
+    shown = (
+        [str(part) for part in display_command]
+        if display_command is not None
+        else args
+    )
+    LOGGER.info("Executar: %s", " ".join(shown))
+
+    try:
+        result = subprocess.run(
+            args,
+            check=False,
+            timeout=timeout,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ConnectError(
+            f"Tempo excedido ao executar: {' '.join(shown)}"
+        ) from exc
+
+    if check and result.returncode != 0:
+        details = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"código {result.returncode}"
+        )
+        raise ConnectError(
+            f"Falhou {' '.join(shown)}: {details}"
+        )
+
+    return result
+
+
+def service_active(name: str) -> bool:
+    return run(
+        ["systemctl", "is-active", "--quiet", name],
+        check=False,
+        timeout=15,
+    ).returncode == 0
+
+
+def set_timesyncd(active: bool) -> None:
+    """Run NTP only while PiBook is in validated client Wi-Fi mode."""
+    action = "start" if active else "stop"
+    result = run(
+        ["systemctl", action, "systemd-timesyncd.service"],
+        check=False,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        details = (
+            (result.stderr or "").strip()
+            or (result.stdout or "").strip()
+            or f"código {result.returncode}"
+        )
+        LOGGER.warning(
+            "Não foi possível %s systemd-timesyncd: %s",
+            action,
+            details,
+        )
+
+
+def atomic_json_write(
+    path: Path,
+    payload: dict[str, Any],
+    mode: int = 0o600,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=str(path.parent),
+        text=True,
+    )
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(
+                payload,
+                handle,
+                indent=2,
+                ensure_ascii=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+
+
+def read_json(
+    path: Path,
+    default: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return dict(default)
+
+    return value if isinstance(value, dict) else dict(default)
+
+
+def load_config() -> dict[str, Any]:
+    config = read_json(CONFIG_PATH, {})
+    required = {
+        "interface",
+        "hotspot_ssid",
+        "hotspot_address",
+    }
+    missing = sorted(required - set(config))
+
+    if missing:
+        raise ConnectError(
+            "Configuração incompleta: " + ", ".join(missing)
+        )
+
+    return config
+
+
+def update_main_state(**updates: Any) -> None:
+    state = read_json(STATE_PATH, {})
+    state.update(updates)
+    state["updated_at"] = now_iso()
+    atomic_json_write(STATE_PATH, state, 0o600)
+    try:
+        atomic_json_write(WEB_STATE_PATH, state, 0o640)
+    except OSError as exc:
+        LOGGER.warning(
+            "Não foi possível atualizar o estado Web: %s",
+            exc,
+        )
+
+
+def load_result() -> dict[str, Any]:
+    return read_json(
+        RESULT_PATH,
+        {
+            "status": "never",
+            "ssid": "",
+            "security": "",
+            "started_at": "",
+            "completed_at": "",
+            "duration_seconds": 0,
+            "profile_id": "",
+            "profile_uuid": "",
+            "addresses": [],
+            "error": "",
+            "hotspot_restored": False,
+        },
+    )
+
+
+def write_result(payload: dict[str, Any]) -> None:
+    atomic_json_write(RESULT_PATH, payload, 0o600)
+
+    try:
+        atomic_json_write(WEB_RESULT_PATH, payload, 0o640)
+    except OSError as exc:
+        LOGGER.warning(
+            "Não foi possível atualizar o resultado Web: %s",
+            exc,
+        )
+
+    if (
+        str(payload.get("status", "")).lower() == "success"
+        and payload.get("profile_uuid")
+    ):
+        cache = read_json(PROFILES_CACHE_PATH, {"profiles": []})
+        profiles = cache.get("profiles", [])
+        if not isinstance(profiles, list):
+            profiles = []
+
+        profile_uuid = str(payload.get("profile_uuid", ""))
+        profiles = [
+            item for item in profiles
+            if isinstance(item, dict)
+            and str(item.get("uuid", "")) != profile_uuid
+        ]
+
+        profiles.append(
+            {
+                "name": str(payload.get("profile_id", "")),
+                "ssid": str(payload.get("ssid", "")),
+                "uuid": profile_uuid,
+                "type": "wifi",
+                "autoconnect": True,
+            }
+        )
+
+        profiles.sort(
+            key=lambda item: (
+                str(item.get("ssid") or item.get("name") or "").lower()
+            )
+        )
+
+        atomic_json_write(
+            PROFILES_CACHE_PATH,
+            {"profiles": profiles},
+            0o640,
+        )
+
+
+@contextlib.contextmanager
+def shared_lock() -> Any:
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    with LOCK_PATH.open("w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        raise ConnectError(
+            "Este comando altera a rede e tem de ser executado com sudo."
+        )
+
+
+def interface_type(interface: str) -> str:
+    result = run(
+        ["iw", "dev", interface, "info"],
+        check=False,
+        timeout=15,
+    )
+
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("type "):
+            return stripped.split(maxsplit=1)[1]
+
+    return ""
+
+
+def ipv4_addresses(interface: str) -> list[str]:
+    result = run(
+        ["ip", "-4", "-o", "address", "show", "dev", interface],
+        check=False,
+        timeout=15,
+    )
+
+    addresses: list[str] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if "inet" not in parts:
+            continue
+        index = parts.index("inet")
+        if index + 1 < len(parts):
+            addresses.append(parts[index + 1])
+
+    return addresses
+
+
+def useful_ipv4_addresses(interface: str) -> list[str]:
+    useful: list[str] = []
+
+    for value in ipv4_addresses(interface):
+        try:
+            address = ipaddress.ip_interface(value).ip
+        except ValueError:
+            continue
+
+        if address.is_link_local:
+            continue
+        if str(address) == "10.42.0.1":
+            continue
+        useful.append(value)
+
+    return useful
+
+
+def nm_value(interface: str, field: str) -> str:
+    result = run(
+        ["nmcli", "-g", field, "device", "show", interface],
+        check=False,
+        timeout=20,
+    )
+    return result.stdout.strip()
+
+
+def current_wifi_profile(interface: str) -> tuple[str, str]:
+    uuid = nm_value(interface, "GENERAL.CON-UUID")
+    name = nm_value(interface, "GENERAL.CONNECTION")
+
+    if not uuid or uuid == "--":
+        return "", ""
+
+    return uuid, "" if name == "--" else name
+
+
+def hotspot_is_active(config: dict[str, Any]) -> bool:
+    interface = str(config["interface"])
+    return (
+        service_active(HOSTAPD_SERVICE)
+        and service_active(DNSMASQ_SERVICE)
+        and interface_type(interface) == "AP"
+        and str(config["hotspot_address"]) in ipv4_addresses(interface)
+    )
+
+
+def wait_for(
+    predicate: Any,
+    *,
+    attempts: int,
+    interval: float,
+    description: str,
+) -> None:
+    for _ in range(attempts):
+        if predicate():
+            return
+        time.sleep(interval)
+
+    raise ConnectError(
+        f"Tempo excedido à espera de {description}."
+    )
+
+
+def cancel_unit_pair(base: str) -> None:
+    run(
+        [
+            "systemctl",
+            "stop",
+            f"{base}.timer",
+            f"{base}.service",
+        ],
+        check=False,
+        timeout=25,
+    )
+    run(
+        ["systemctl", "reset-failed", f"{base}.service"],
+        check=False,
+        timeout=20,
+    )
+
+
+def schedule_recovery(seconds: int = 230) -> None:
+    cancel_unit_pair(RECOVERY_UNIT)
+
+    run(
+        [
+            "systemd-run",
+            "--quiet",
+            f"--unit={RECOVERY_UNIT}",
+            f"--on-active={seconds}s",
+            "--timer-property=AccuracySec=5s",
+            "--collect",
+            "/usr/local/sbin/pibook-wifi-connectctl",
+            "recover",
+        ],
+        timeout=30,
+    )
+
+
+def validate_ssid(ssid: str) -> str:
+    if not ssid:
+        raise ConnectError("O SSID não pode estar vazio.")
+
+    encoded = ssid.encode("utf-8")
+    if len(encoded) > 32:
+        raise ConnectError(
+            "O SSID excede o limite Wi-Fi de 32 bytes."
+        )
+
+    if "\x00" in ssid:
+        raise ConnectError("O SSID contém um caráter inválido.")
+
+    return ssid
+
+
+def validate_password(password: str, security: str) -> str:
+    if security == "open":
+        if password:
+            raise ConnectError(
+                "Uma rede aberta não deve receber palavra-passe."
+            )
+        return ""
+
+    if len(password) == 64 and re.fullmatch(
+        r"[0-9A-Fa-f]{64}",
+        password,
+    ):
+        return password
+
+    if not 8 <= len(password) <= 63:
+        raise ConnectError(
+            "A palavra-passe WPA deve ter 8–63 caracteres "
+            "ou 64 dígitos hexadecimais."
+        )
+
+    return password
+
+
+def profile_names_for_id(profile_id: str) -> list[str]:
+    result = run(
+        [
+            "nmcli",
+            "--terse",
+            "--escape",
+            "no",
+            "--fields",
+            "NAME,UUID",
+            "connection",
+            "show",
+        ],
+        check=False,
+        timeout=30,
+    )
+
+    uuids: list[str] = []
+    prefix = profile_id + ":"
+
+    for line in result.stdout.splitlines():
+        if line.startswith(prefix):
+            uuid = line[len(prefix):].strip()
+            if uuid:
+                uuids.append(uuid)
+
+    return uuids
+
+
+def delete_profile_uuid(uuid: str) -> None:
+    run(
+        ["nmcli", "connection", "delete", "uuid", uuid],
+        check=False,
+        timeout=40,
+    )
+
+
+def stop_hotspot_services() -> None:
+    run(
+        ["systemctl", "stop", CAPTIVE_SERVICE],
+        check=False,
+        timeout=30,
+    )
+    run(
+        ["systemctl", "stop", DNSMASQ_SERVICE],
+        check=False,
+        timeout=30,
+    )
+    run(
+        ["systemctl", "stop", HOSTAPD_SERVICE],
+        check=False,
+        timeout=30,
+    )
+
+    for service in (
+        CAPTIVE_SERVICE,
+        DNSMASQ_SERVICE,
+        HOSTAPD_SERVICE,
+    ):
+        run(
+            ["systemctl", "reset-failed", service],
+            check=False,
+            timeout=20,
+        )
+
+
+def prepare_client_mode(config: dict[str, Any]) -> None:
+    interface = str(config["interface"])
+
+    stop_hotspot_services()
+
+    run(
+        ["ip", "link", "set", interface, "down"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "address", "flush", "dev", interface],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["iw", "dev", interface, "set", "type", "managed"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "link", "set", interface, "up"],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["systemctl", "start", "wpa_supplicant.service"],
+        check=False,
+        timeout=30,
+    )
+
+    run(
+        ["systemctl", "start", "NetworkManager.service"],
+        check=False,
+        timeout=60,
+    )
+    wait_for(
+        lambda: service_active("NetworkManager.service"),
+        attempts=30,
+        interval=1,
+        description="NetworkManager ativo para operação Wi-Fi",
+    )
+
+    run(
+        ["nmcli", "device", "set", interface, "managed", "yes"],
+        check=False,
+        timeout=25,
+    )
+    run(
+        ["nmcli", "radio", "wifi", "on"],
+        check=False,
+        timeout=20,
+    )
+
+    wait_for(
+        lambda: bool(nm_value(interface, "GENERAL.STATE")),
+        attempts=30,
+        interval=2,
+        description="NetworkManager reconhecer a wlan0",
+    )
+
+    run(
+        ["nmcli", "device", "set", interface, "autoconnect", "no"],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["nmcli", "device", "disconnect", interface],
+        check=False,
+        timeout=30,
+    )
+    time.sleep(3)
+
+
+def create_temporary_profile(
+    config: dict[str, Any],
+    request: dict[str, Any],
+) -> tuple[str, str, str]:
+    interface = str(config["interface"])
+    ssid = str(request["ssid"])
+    password = str(request.get("password", ""))
+    security = str(request["security"])
+    hidden = bool(request.get("hidden", False))
+
+    digest = hashlib.sha256(
+        ssid.encode("utf-8")
+    ).hexdigest()[:12]
+    stable_id = f"pibook-wifi-{digest}"
+    token = secrets.token_hex(3)
+    temporary_id = f"pibook-try-{digest}-{token}"
+    temporary_uuid = ""
+
+    try:
+        result = run(
+            [
+                "nmcli",
+                "connection",
+                "add",
+                "type",
+                "wifi",
+                "ifname",
+                interface,
+                "con-name",
+                temporary_id,
+                "ssid",
+                ssid,
+            ],
+            timeout=45,
+        )
+
+        match = re.search(
+            r"\(([0-9a-fA-F-]{36})\)",
+            result.stdout + result.stderr,
+        )
+        temporary_uuid = match.group(1) if match else ""
+
+        if not temporary_uuid:
+            uuids = profile_names_for_id(temporary_id)
+            if not uuids:
+                raise ConnectError(
+                    "O perfil temporário foi criado sem UUID identificável."
+                )
+            temporary_uuid = uuids[0]
+
+        run(
+            [
+                "nmcli",
+                "connection",
+                "modify",
+                "uuid",
+                temporary_uuid,
+                "connection.autoconnect",
+                "no",
+                "ipv4.method",
+                "auto",
+                "ipv6.method",
+                "auto",
+                "802-11-wireless.mode",
+                "infrastructure",
+                "802-11-wireless.hidden",
+                "yes" if hidden else "no",
+            ],
+            timeout=40,
+        )
+
+        if security != "open":
+            key_mgmt = "sae" if security == "sae" else "wpa-psk"
+            command = [
+                "nmcli",
+                "connection",
+                "modify",
+                "uuid",
+                temporary_uuid,
+                "802-11-wireless-security.key-mgmt",
+                key_mgmt,
+                "802-11-wireless-security.psk-flags",
+                "0",
+                "802-11-wireless-security.psk",
+                password,
+            ]
+            shown = list(command)
+            shown[-1] = "<oculta>"
+            run(
+                command,
+                display_command=shown,
+                timeout=40,
+            )
+
+            flags_result = run(
+                [
+                    "nmcli",
+                    "--get-values",
+                    "802-11-wireless-security.psk-flags",
+                    "connection",
+                    "show",
+                    "uuid",
+                    temporary_uuid,
+                ],
+                timeout=30,
+            )
+            flags_text = flags_result.stdout.strip().lower()
+            if not (
+                flags_text == "0"
+                or flags_text == "none"
+                or flags_text.startswith("0 ")
+                or flags_text.startswith("0(")
+            ):
+                raise ConnectError(
+                    "O perfil Wi-Fi não guardou o PSK como segredo "
+                    "gerido pelo sistema."
+                )
+
+            secret_result = run(
+                [
+                    "nmcli",
+                    "--show-secrets",
+                    "--get-values",
+                    "802-11-wireless-security.psk",
+                    "connection",
+                    "show",
+                    "uuid",
+                    temporary_uuid,
+                ],
+                timeout=30,
+            )
+            stored_secret = secret_result.stdout.rstrip("\r\n")
+            if stored_secret != password:
+                raise ConnectError(
+                    "O NetworkManager não confirmou o armazenamento "
+                    "da palavra-passe no perfil temporário."
+                )
+
+        return temporary_id, temporary_uuid, stable_id
+
+    except Exception:
+        LOGGER.exception(
+            "Falha ao preparar o perfil temporário %s",
+            temporary_id,
+        )
+
+        if temporary_uuid:
+            delete_profile_uuid(temporary_uuid)
+        else:
+            for uuid in profile_names_for_id(temporary_id):
+                delete_profile_uuid(uuid)
+
+        raise
+
+
+def connect_profile(
+    interface: str,
+    profile_uuid: str,
+    *,
+    password: str,
+    security: str,
+) -> list[str]:
+    secret_path: Optional[Path] = None
+
+    command = [
+        "nmcli",
+        "--wait",
+        "90",
+        "connection",
+        "up",
+        "uuid",
+        profile_uuid,
+        "ifname",
+        interface,
+    ]
+
+    try:
+        if security != "open":
+            if "\n" in password or "\r" in password:
+                raise ConnectError(
+                    "A palavra-passe contém uma quebra de linha inválida."
+                )
+
+            secret_dir = Path("/run/pibook-network")
+            secret_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+                mode=0o700,
+            )
+
+            fd, temporary = tempfile.mkstemp(
+                prefix=".wifi-secret-",
+                dir=str(secret_dir),
+                text=True,
+            )
+            secret_path = Path(temporary)
+
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(
+                    fd,
+                    "w",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    handle.write(
+                        "802-11-wireless-security.psk:"
+                        + password
+                        + "\n"
+                    )
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
+
+            command.extend(
+                ["passwd-file", str(secret_path)]
+            )
+
+        result = run(
+            command,
+            check=False,
+            timeout=105,
+        )
+
+        if result.returncode != 0:
+            details = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"código {result.returncode}"
+            )
+            raise ConnectError(
+                "A ligação Wi-Fi falhou: " + details
+            )
+
+        wait_for(
+            lambda: (
+                current_wifi_profile(interface)[0] == profile_uuid
+                and bool(useful_ipv4_addresses(interface))
+            ),
+            attempts=30,
+            interval=2,
+            description="endereço IP da rede externa",
+        )
+
+        return useful_ipv4_addresses(interface)
+
+    finally:
+        if secret_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                secret_path.unlink()
+
+
+def promote_profile(
+    interface: str,
+    temporary_uuid: str,
+    stable_id: str,
+) -> tuple[str, str]:
+    old_uuids = [
+        uuid
+        for uuid in profile_names_for_id(stable_id)
+        if uuid != temporary_uuid
+    ]
+
+    for uuid in old_uuids:
+        delete_profile_uuid(uuid)
+
+    run(
+        [
+            "nmcli",
+            "connection",
+            "modify",
+            "uuid",
+            temporary_uuid,
+            "connection.id",
+            stable_id,
+            "connection.autoconnect",
+            "yes",
+            "connection.autoconnect-priority",
+            "50",
+        ],
+        timeout=40,
+    )
+
+    run(
+        ["nmcli", "device", "set", interface, "autoconnect", "yes"],
+        check=False,
+        timeout=20,
+    )
+
+    uuid, name = current_wifi_profile(interface)
+    return uuid or temporary_uuid, name or stable_id
+
+
+def restore_hotspot(config: dict[str, Any]) -> None:
+    interface = str(config["interface"])
+    hotspot_address = str(config["hotspot_address"])
+
+    run(
+        ["nmcli", "device", "set", interface, "autoconnect", "yes"],
+        check=False,
+        timeout=20,
+    )
+
+    wifi_uuid, _ = current_wifi_profile(interface)
+    if wifi_uuid:
+        run(
+            ["nmcli", "connection", "down", "uuid", wifi_uuid],
+            check=False,
+            timeout=45,
+        )
+
+    run(
+        ["nmcli", "device", "disconnect", interface],
+        check=False,
+        timeout=30,
+    )
+    run(
+        ["nmcli", "device", "set", interface, "managed", "no"],
+        timeout=25,
+    )
+
+    run(
+        ["systemctl", "stop", "NetworkManager.service"],
+        check=False,
+        timeout=40,
+    )
+    wait_for(
+        lambda: not service_active("NetworkManager.service"),
+        attempts=20,
+        interval=0.5,
+        description="NetworkManager parado para regressar ao hotspot",
+    )
+
+    run(
+        ["systemctl", "stop", "wpa_supplicant.service"],
+        check=False,
+        timeout=30,
+    )
+    time.sleep(2)
+
+    run(
+        ["rfkill", "unblock", "wifi"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "link", "set", interface, "down"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "address", "flush", "dev", interface],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["iw", "dev", interface, "set", "type", "managed"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "link", "set", interface, "up"],
+        timeout=20,
+    )
+
+    run(
+        ["systemctl", "start", HOSTAPD_SERVICE],
+        timeout=30,
+    )
+    wait_for(
+        lambda: (
+            service_active(HOSTAPD_SERVICE)
+            and interface_type(interface) == "AP"
+        ),
+        attempts=25,
+        interval=2,
+        description="hostapd em modo AP",
+    )
+
+    run(
+        ["ip", "address", "flush", "dev", interface],
+        check=False,
+        timeout=15,
+    )
+    run(
+        [
+            "ip",
+            "address",
+            "add",
+            hotspot_address,
+            "dev",
+            interface,
+        ],
+        timeout=20,
+    )
+    run(
+        ["ip", "link", "set", interface, "up"],
+        timeout=20,
+    )
+    run(
+        ["systemctl", "start", DNSMASQ_SERVICE],
+        timeout=35,
+    )
+
+    wait_for(
+        lambda: hotspot_is_active(config),
+        attempts=25,
+        interval=2,
+        description="restauro do hotspot",
+    )
+
+    wait_for(
+        lambda: service_active(CAPTIVE_SERVICE),
+        attempts=20,
+        interval=2,
+        description="portal cativo",
+    )
+
+
+def start_request(
+    config: dict[str, Any],
+    *,
+    ssid: str,
+    password: str,
+    security: str,
+    hidden: bool,
+) -> dict[str, Any]:
+    require_root()
+
+    if not hotspot_is_active(config):
+        raise ConnectError(
+            "A ligação só pode começar com o hotspot PiBook ativo."
+        )
+
+    if service_active(CONNECT_SERVICE):
+        raise ConnectError(
+            "Já existe uma tentativa de ligação em curso."
+        )
+
+    if service_active(SCAN_SERVICE):
+        raise ConnectError(
+            "Existe uma pesquisa Wi-Fi em curso."
+        )
+
+    ssid = validate_ssid(ssid)
+    password = validate_password(password, security)
+    started_at = now_iso()
+
+    request = {
+        "ssid": ssid,
+        "password": password,
+        "security": security,
+        "hidden": hidden,
+        "started_at": started_at,
+    }
+
+    cancel_unit_pair(TEST_RESTORE_UNIT)
+    cancel_unit_pair(SCAN_RECOVERY_UNIT)
+    schedule_recovery()
+
+    atomic_json_write(REQUEST_PATH, request)
+    write_result(
+        {
+            "status": "queued",
+            "ssid": ssid,
+            "security": security,
+            "started_at": started_at,
+            "completed_at": "",
+            "duration_seconds": 0,
+            "profile_id": "",
+            "profile_uuid": "",
+            "addresses": [],
+            "error": "",
+            "hotspot_restored": True,
+        }
+    )
+    update_main_state(
+        desired_mode="wifi",
+        actual_mode="hotspot",
+        operation="connect_queued",
+        last_connect_status="queued",
+        last_connect_ssid=ssid,
+        last_connect_started_at=started_at,
+        last_connect_completed_at="",
+        last_connect_error="",
+        last_error="",
+    )
+
+    run(
+        ["systemctl", "reset-failed", CONNECT_SERVICE],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["systemctl", "--no-block", "start", CONNECT_SERVICE],
+        timeout=25,
+    )
+
+    return {
+        "started": True,
+        "ssid": ssid,
+        "message": (
+            "A ligação ao hotspot vai cair. "
+            "Se a rede externa aceitar as credenciais, "
+            "o PiBook ficará ligado a essa rede. "
+            "Se falhar, o hotspot PiBook regressará."
+        ),
+    }
+
+
+def worker(config: dict[str, Any]) -> dict[str, Any]:
+    require_root()
+
+    request = read_json(REQUEST_PATH, {})
+    with contextlib.suppress(FileNotFoundError):
+        REQUEST_PATH.unlink()
+
+    if not request:
+        raise ConnectError("Não existe um pedido de ligação válido.")
+
+    ssid = validate_ssid(str(request.get("ssid", "")))
+    security = str(request.get("security", "wpa-psk"))
+    password = validate_password(
+        str(request.get("password", "")),
+        security,
+    )
+    request["password"] = password
+
+    interface = str(config["interface"])
+    started_at = str(request.get("started_at") or now_iso())
+    started_monotonic = time.monotonic()
+
+    temporary_id = ""
+    temporary_uuid = ""
+    stable_id = ""
+    addresses: list[str] = []
+    error = ""
+    hotspot_restored = False
+    success = False
+    final_uuid = ""
+    final_name = ""
+
+    with shared_lock():
+        if not hotspot_is_active(config):
+            raise ConnectError(
+                "O worker iniciou sem o hotspot ativo."
+            )
+
+        update_main_state(
+            desired_mode="wifi",
+            actual_mode="transition",
+            operation="connecting_wifi",
+            last_connect_status="running",
+            last_connect_ssid=ssid,
+            last_connect_started_at=started_at,
+            last_connect_completed_at="",
+            last_connect_error="",
+            last_error="",
+        )
+
+        write_result(
+            {
+                "status": "running",
+                "ssid": ssid,
+                "security": security,
+                "started_at": started_at,
+                "completed_at": "",
+                "duration_seconds": 0,
+                "profile_id": "",
+                "profile_uuid": "",
+                "addresses": [],
+                "error": "",
+                "hotspot_restored": False,
+            }
+        )
+
+        try:
+            prepare_client_mode(config)
+            temporary_id, temporary_uuid, stable_id = (
+                create_temporary_profile(config, request)
+            )
+            addresses = connect_profile(
+                interface,
+                temporary_uuid,
+                password=password,
+                security=security,
+            )
+            final_uuid, final_name = promote_profile(
+                interface,
+                temporary_uuid,
+                stable_id,
+            )
+            success = True
+
+        except Exception as exc:
+            error = str(exc)
+            LOGGER.exception("Falha ao ligar à rede externa")
+
+            if temporary_uuid:
+                delete_profile_uuid(temporary_uuid)
+            elif temporary_id:
+                for uuid in profile_names_for_id(temporary_id):
+                    delete_profile_uuid(uuid)
+
+            try:
+                restore_hotspot(config)
+                hotspot_restored = hotspot_is_active(config)
+            except Exception:
+                LOGGER.exception(
+                    "Falha ao restaurar o hotspot após erro"
+                )
+
+        completed_at = now_iso()
+        duration = round(
+            time.monotonic() - started_monotonic,
+            1,
+        )
+
+        if success:
+            cancel_unit_pair(RECOVERY_UNIT)
+            write_result(
+                {
+                    "status": "success",
+                    "ssid": ssid,
+                    "security": security,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "duration_seconds": duration,
+                    "profile_id": final_name or stable_id,
+                    "profile_uuid": final_uuid,
+                    "addresses": addresses,
+                    "error": "",
+                    "hotspot_restored": False,
+                }
+            )
+            update_main_state(
+                desired_mode="wifi",
+                actual_mode="wifi",
+                operation="idle",
+                last_wifi_uuid=final_uuid,
+                last_wifi_name=final_name or stable_id,
+                last_connect_status="success",
+                last_connect_ssid=ssid,
+                last_connect_started_at=started_at,
+                last_connect_completed_at=completed_at,
+                last_connect_error="",
+                last_error="",
+            )
+            set_timesyncd(True)
+        else:
+            if hotspot_restored:
+                cancel_unit_pair(RECOVERY_UNIT)
+                update_main_state(
+                    desired_mode="hotspot",
+                    actual_mode="hotspot",
+                    operation="idle",
+                    last_connect_status="failed",
+                    last_connect_ssid=ssid,
+                    last_connect_started_at=started_at,
+                    last_connect_completed_at=completed_at,
+                    last_connect_error=error,
+                    last_error="",
+                )
+                set_timesyncd(False)
+            else:
+                update_main_state(
+                    desired_mode="hotspot",
+                    actual_mode="transition",
+                    operation="connect_recovery_pending",
+                    last_connect_status="failed",
+                    last_connect_ssid=ssid,
+                    last_connect_started_at=started_at,
+                    last_connect_completed_at=completed_at,
+                    last_connect_error=error,
+                    last_error=(
+                        "O restauro de segurança do hotspot "
+                        "permanece programado."
+                    ),
+                )
+
+            write_result(
+                {
+                    "status": "failed",
+                    "ssid": ssid,
+                    "security": security,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "duration_seconds": duration,
+                    "profile_id": "",
+                    "profile_uuid": "",
+                    "addresses": [],
+                    "error": error,
+                    "hotspot_restored": hotspot_restored,
+                }
+            )
+
+    if not success:
+        if hotspot_restored:
+            raise ConnectError(
+                "A ligação falhou e o hotspot foi restaurado: "
+                + error
+            )
+        raise ConnectError(
+            "A ligação falhou e aguarda recuperação automática: "
+            + error
+        )
+
+    return load_result()
+
+
+def recover(config: dict[str, Any]) -> dict[str, Any]:
+    require_root()
+    interface = str(config["interface"])
+
+    if hotspot_is_active(config):
+        cancel_unit_pair(RECOVERY_UNIT)
+        update_main_state(
+            desired_mode="hotspot",
+            actual_mode="hotspot",
+            operation="idle",
+            last_error="",
+        )
+        set_timesyncd(False)
+        return {
+            "recovered": True,
+            "mode": "hotspot",
+        }
+
+    wifi_uuid, wifi_name = current_wifi_profile(interface)
+    addresses = useful_ipv4_addresses(interface)
+
+    if wifi_uuid and addresses:
+        cancel_unit_pair(RECOVERY_UNIT)
+        update_main_state(
+            desired_mode="wifi",
+            actual_mode="wifi",
+            operation="idle",
+            last_wifi_uuid=wifi_uuid,
+            last_wifi_name=wifi_name,
+            last_error="",
+        )
+        set_timesyncd(True)
+        return {
+            "recovered": True,
+            "mode": "wifi",
+            "uuid": wifi_uuid,
+            "addresses": addresses,
+        }
+
+    result = run(
+        ["/usr/local/sbin/pibook-networkctl", "hotspot"],
+        check=False,
+        timeout=190,
+    )
+
+    if result.returncode != 0:
+        details = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"código {result.returncode}"
+        )
+        raise ConnectError(
+            "A recuperação automática do hotspot falhou: "
+            + details
+        )
+
+    cancel_unit_pair(RECOVERY_UNIT)
+    return {
+        "recovered": True,
+        "mode": "hotspot",
+    }
+
+
+def print_result(as_json: bool) -> None:
+    payload = load_result()
+
+    if as_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    print("PiBook — resultado da ligação Wi-Fi")
+    print("=" * 64)
+    print(f"Estado:          {payload.get('status', 'never')}")
+    print(f"Rede:            {payload.get('ssid') or 'nenhuma'}")
+    print(f"Segurança:       {payload.get('security') or 'desconhecida'}")
+    print(f"Início:          {payload.get('started_at') or 'ainda não'}")
+    print(f"Fim:             {payload.get('completed_at') or 'ainda não'}")
+    print(f"Duração:         {payload.get('duration_seconds', 0)} s")
+
+    profile_id = str(payload.get("profile_id", ""))
+    if profile_id:
+        print(f"Perfil:          {profile_id}")
+
+    addresses = payload.get("addresses", [])
+    if isinstance(addresses, list) and addresses:
+        print("Endereços:       " + ", ".join(str(x) for x in addresses))
+
+    print(
+        "Hotspot:         "
+        + (
+            "restaurado"
+            if payload.get("hotspot_restored")
+            else "não restaurado"
+        )
+    )
+
+    error = str(payload.get("error", ""))
+    if error:
+        print(f"Erro:            {error}")
+
+
+def print_status(config: dict[str, Any], as_json: bool) -> None:
+    interface = str(config["interface"])
+
+    # Hotspot mode intentionally keeps NetworkManager stopped.
+    # Status polling must never wake it merely to confirm that no
+    # external Wi-Fi connection is active.
+    if service_active("NetworkManager.service"):
+        wifi_uuid, wifi_name = current_wifi_profile(interface)
+    else:
+        wifi_uuid, wifi_name = "", ""
+
+    payload = {
+        "connect_service_active": service_active(CONNECT_SERVICE),
+        "recovery_timer_active": service_active(
+            f"{RECOVERY_UNIT}.timer"
+        ),
+        "hotspot_active": hotspot_is_active(config),
+        "wifi_uuid": wifi_uuid,
+        "wifi_name": wifi_name,
+        "addresses": ipv4_addresses(interface),
+        "result": load_result(),
+    }
+
+    if as_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    print("PiBook — estado da ligação Wi-Fi externa")
+    print("=" * 64)
+    print(
+        "Tentativa:       "
+        + (
+            "em curso"
+            if payload["connect_service_active"]
+            else "inativa"
+        )
+    )
+    print(
+        "Recuperação:     "
+        + (
+            "programada"
+            if payload["recovery_timer_active"]
+            else "não"
+        )
+    )
+    print(
+        "Hotspot:         "
+        + (
+            "ativo"
+            if payload["hotspot_active"]
+            else "inativo/transição"
+        )
+    )
+    print(
+        "Wi-Fi externo:   "
+        + (
+            payload["wifi_name"]
+            if payload["wifi_uuid"]
+            else "não ligado"
+        )
+    )
+    print(
+        "Último estado:   "
+        + str(payload["result"].get("status", "never"))
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Ligação Wi-Fi externa do PiBook"
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+    )
+
+    start_parser = subparsers.add_parser(
+        "start",
+        help="Tentar ligar a uma rede externa",
+    )
+    start_parser.add_argument("--ssid", required=True)
+    start_parser.add_argument(
+        "--security",
+        choices=("wpa-psk", "sae", "open"),
+        default="wpa-psk",
+    )
+    start_parser.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="Ler a palavra-passe da entrada padrão",
+    )
+    start_parser.add_argument(
+        "--hidden",
+        action="store_true",
+    )
+
+    subparsers.add_parser(
+        "worker",
+        help=argparse.SUPPRESS,
+    )
+    subparsers.add_parser(
+        "recover",
+        help=argparse.SUPPRESS,
+    )
+
+    result_parser = subparsers.add_parser(
+        "result",
+        help="Mostrar o último resultado",
+    )
+    result_parser.add_argument("--json", action="store_true")
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Mostrar o estado atual",
+    )
+    status_parser.add_argument("--json", action="store_true")
+
+    return parser.parse_args()
+
+
+def main() -> int:
+    try:
+        config = load_config()
+        args = parse_args()
+
+        if args.command == "start":
+            password = ""
+            if args.security != "open":
+                if not args.password_stdin:
+                    raise ConnectError(
+                        "Usa --password-stdin para fornecer "
+                        "a palavra-passe sem a deixar no histórico."
+                    )
+                password = sys.stdin.read()
+                password = password.rstrip("\r\n")
+
+            result = start_request(
+                config,
+                ssid=args.ssid,
+                password=password,
+                security=args.security,
+                hidden=args.hidden,
+            )
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
+        if args.command == "worker":
+            result = worker(config)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
+        if args.command == "recover":
+            result = recover(config)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
+        if args.command == "result":
+            print_result(args.json)
+            return 0
+
+        if args.command == "status":
+            print_status(config, args.json)
+            return 0
+
+        raise ConnectError("Comando desconhecido.")
+
+    except ConnectError as exc:
+        LOGGER.error("%s", exc)
+        print(f"ERRO: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        LOGGER.exception("Erro inesperado")
+        print(f"ERRO inesperado: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

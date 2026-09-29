@@ -1,0 +1,37 @@
+--- a/lib/waveshare_epd/epdconfig.py
++++ b/lib/waveshare_epd/epdconfig.py
+@@ -53,6 +53,10 @@
+         import gpiozero
+
+         self.SPI = spidev.SpiDev()
++        # module_init() is called whenever the display switches between
++        # full and partial modes. Keep one SPI descriptor open instead of
++        # leaking a new /dev/spidev0.0 descriptor on every call.
++        self._spi_open = False
+         self.GPIO_RST_PIN    = gpiozero.LED(self.RST_PIN)
+         self.GPIO_DC_PIN     = gpiozero.LED(self.DC_PIN)
+         # self.GPIO_CS_PIN     = gpiozero.LED(self.CS_PIN)
+@@ -139,15 +143,20 @@
+             self.DEV_SPI.DEV_Module_Init()
+
+         else:
+-            # SPI device, bus = 0, device = 0
+-            self.SPI.open(0, 0)
++            # SPI device, bus = 0, device = 0. Reuse the descriptor across
++            # full/partial controller reinitializations.
++            if not self._spi_open:
++                self.SPI.open(0, 0)
++                self._spi_open = True
+             self.SPI.max_speed_hz = 4000000
+             self.SPI.mode = 0b00
+         return 0
+
+     def module_exit(self, cleanup=False):
+         logger.debug("spi end")
+-        self.SPI.close()
++        if self._spi_open:
++            self.SPI.close()
++            self._spi_open = False
+
+         self.GPIO_RST_PIN.off()
+         self.GPIO_DC_PIN.off()

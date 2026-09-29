@@ -1,120 +1,149 @@
-<h2>📖 E-Reader</h2>
+<div class="library-page">
+    <div class="library-page-header">
+        <div>
+            <h2>📚 Biblioteca</h2>
+            <p>Gerir e abrir os livros do PiBook.</p>
+        </div>
+    </div>
 
-<!-- Remote Control -->
-<h3>🎮 Remote Control</h3>
-<p style="color: #666; margin-bottom: 16px;">Control your PiBook e-reader remotely</p>
+    <form onsubmit="uploadFile(event)" class="library-upload">
+        <input
+            type="file"
+            id="epub-upload-input"
+            name="file"
+            accept=".epub"
+            multiple
+            hidden
+            onchange="updateEpubUploadSelection(this)"
+        >
 
-<div class="controls">
-    <button class="btn" onclick="sendCommand('prev')">◀ Previous</button>
-    <button class="btn btn-secondary" onclick="sendCommand('select')">✓ Select</button>
-    <button class="btn" onclick="sendCommand('next')">Next ▶</button>
-</div>
+        <label for="epub-upload-input"
+            class="btn btn-secondary library-file-select">
+            Selecionar EPUB
+        </label>
 
-<div class="controls" style="margin-top: 12px;">
-    <button class="btn btn-secondary" onclick="sendCommand('back')">← Back</button>
-    <button class="btn btn-secondary" onclick="sendCommand('menu')">≡ Menu</button>
-    <button class="btn" onclick="location.reload()">🔄 Refresh</button>
-</div>
+        <button type="submit" class="btn">Carregar</button>
 
-<!-- Book Library -->
-<h3 style="margin-top: 40px;">📚 Book Library</h3>
-<p style="color: #666; margin-bottom: 24px;">Manage your EPUB books</p>
+        <div id="epub-upload-selection" class="library-upload-selection">
+            Nenhum EPUB selecionado
+        </div>
+    </form>
 
-<!-- Upload Form -->
-<form onsubmit="uploadFile(event)" class="upload-form">
-    <input type="file" name="file" accept=".epub" required>
-    <button type="submit" class="btn">Upload EPUB</button>
-</form>
-
-<!-- Books Table -->
-{% if books %}
-<table>
-    <thead>
-        <tr>
-            <th>Filename</th>
-            <th>Size</th>
-            <th>Actions</th>
-        </tr>
-    </thead>
-    <tbody>
+    {% if books %}
+    <div class="library-book-list">
         {% for book in books %}
-        <tr>
-            <td>{{ book.filename }}</td>
-            <td>{{ book.size }}</td>
-            <td>
-                <button class="btn btn-danger" onclick="deleteFile('{{ book.filename }}')">Delete</button>
-            </td>
-        </tr>
+        <article class="library-book-card">
+            <div class="library-book-main">
+                <div class="library-book-icon" aria-hidden="true">📖</div>
+
+                <div class="library-book-info">
+                    <strong class="library-book-title">{{ book.title }}</strong>
+
+                    <div class="library-book-meta">
+                        <span>{{ book.size }}</span>
+                        <span aria-hidden="true">•</span>
+                        <span
+                            class="epub-preparation-status"
+                            data-filename="{{ book.filename|e }}"
+                        >A verificar…</span>
+                    </div>
+
+                    <div class="library-reading-summary">
+                        <div class="library-reading-top">
+                            <span
+                                class="library-reading-status"
+                                data-status="{{ book.reading_status }}"
+                            >{{ book.reading_status_label }}</span>
+
+                            {% if book.total_pages > 0 %}
+                            <span class="library-reading-progress">
+                                {{ book.progress_percent }}%
+                                · pág. {{ book.current_page_display }}/{{ book.total_pages }}
+                            </span>
+                            {% endif %}
+                        </div>
+
+                        <div class="library-reading-details">
+                            <span
+                                class="library-rating"
+                                aria-label="Avaliação: {{ book.rating_label }}"
+                            >
+                                {% for star in book.rating_stars %}
+                                    {% if star == 'full' %}
+                                        <span class="library-star is-full">★</span>
+                                    {% elif star == 'half' %}
+                                        <span class="library-star is-half">★</span>
+                                    {% else %}
+                                        <span class="library-star is-empty">☆</span>
+                                    {% endif %}
+                                {% endfor %}
+                                <small>{{ book.rating_label }}</small>
+                            </span>
+
+                            {% if book.reading_status != 'unread' %}
+                            <span>
+                                Tempo: {{ book.reading_time_label }}
+                            </span>
+                            {% endif %}
+
+                            {% if book.times_finished > 0 %}
+                            <span>
+                                Lido {{ book.times_finished }}
+                                {% if book.times_finished == 1 %}vez{% else %}vezes{% endif %}
+                            </span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="library-book-actions{% if book.can_reset_position or book.can_reread %} has-lifecycle-action{% endif %}">
+                <button
+                    class="btn library-action-open"
+                    onclick='openBook({{ book.filename|tojson }}, {{ book.title|tojson }})'
+                >{{ book.open_label }}</button>
+
+                {% if book.can_reset_position %}
+                <button
+                    class="btn btn-secondary"
+                    onclick='resetLibraryBookPosition({{ book.path|tojson }}, {{ book.title|tojson }})'
+                >Repor posição</button>
+                {% elif book.can_reread %}
+                <button
+                    class="btn btn-secondary"
+                    onclick='rereadBook({{ book.filename|tojson }}, {{ book.title|tojson }})'
+                >Reler</button>
+                {% endif %}
+
+                <button
+                    class="btn btn-secondary"
+                    onclick='renameBook({{ book.filename|tojson }}, {{ book.title|tojson }})'
+                >Renomear</button>
+
+                <button
+                    class="btn btn-danger"
+                    onclick='deleteFile({{ book.filename|tojson }}, {{ book.title|tojson }})'
+                >Eliminar</button>
+            </div>
+        </article>
         {% endfor %}
-    </tbody>
-</table>
-{% else %}
-<div class="empty">
-    <p>📚 No books yet. Upload an EPUB to get started!</p>
+    </div>
+    {% else %}
+    <div class="library-empty">
+        <div aria-hidden="true">📚</div>
+        <p>Ainda não existem livros.</p>
+        <small>Carrega um EPUB para começar.</small>
+    </div>
+    {% endif %}
+
+
+
+
+
+    <div class="library-progress-actions">
+        <button
+            class="btn btn-secondary"
+            onclick="resetAllLibraryPositions()"
+        >↺ Repor posições ativas</button>
+    </div>
 </div>
-{% endif %}
-
-<!-- Reader Settings -->
-<h3 style="margin-top: 40px;">⚙️ Reading Settings</h3>
-<p style="color: #666; margin-bottom: 24px;">Configure your reading experience</p>
-
-<form id="reader-settings-form">
-    <div class="form-group">
-        <label for="zoom">Zoom Level</label>
-        <input type="number" id="zoom" name="zoom" value="{{ settings.zoom }}" min="0.5" max="2.0" step="0.1">
-        <p class="help-text">Text size (0.5-2.0). 1.0 = fit to screen, less than 1.0 = smaller, greater than 1.0 =
-            larger</p>
-    </div>
-
-    <div class="form-group">
-        <label for="full_refresh_interval">Full Refresh Interval</label>
-        <input type="number" id="full_refresh_interval" name="full_refresh_interval"
-            value="{{ settings.full_refresh_interval }}" min="1" max="20" step="1">
-        <p class="help-text">Number of page turns before full refresh to clear ghosting (1-20)</p>
-    </div>
-
-    <div class="form-group">
-        <div class="checkbox-group">
-            <input type="checkbox" id="show_page_numbers" name="show_page_numbers" {% if settings.show_page_numbers
-                %}checked{% endif %}>
-            <label for="show_page_numbers" style="margin: 0;">Show Page Numbers</label>
-        </div>
-        <p class="help-text">Display "Page X of Y" at bottom of screen when reading</p>
-    </div>
-
-    <div class="form-group">
-        <label for="items_per_page">Books Per Page</label>
-        <input type="number" id="items_per_page" name="items_per_page" value="{{ settings.items_per_page }}" min="3"
-            max="6" step="1">
-        <p class="help-text">Number of books shown on library screen (3-6)</p>
-    </div>
-
-    <div class="form-group">
-        <div class="checkbox-group">
-            <input type="checkbox" id="wifi_while_reading" name="wifi_while_reading" {% if settings.wifi_while_reading
-                %}checked{% endif %}>
-            <label for="wifi_while_reading" style="margin: 0;">Keep WiFi On While Reading</label>
-        </div>
-        <p class="help-text">🔋 Uncheck to save battery (WiFi turns off when reading, on when in library)</p>
-    </div>
-
-    <button type="submit" class="btn">Save Reading Settings</button>
-</form>
-
-<div id="reader-settings-message" style="margin-top: 24px; display: none;"></div>
-
-<!-- Reading Progress Reset -->
-<h3 style="margin-top: 40px;">📍 Reading Positions</h3>
-<p style="color: #666; margin-bottom: 16px;">Manage your saved reading positions. Reset a book to start from the
-    beginning.</p>
-
-<div id="progress-list-container">
-    <p style="color: #888;">Loading saved positions...</p>
-</div>
-
-<div style="margin-top: 16px; display: flex; gap: 12px; flex-wrap: wrap;">
-    <button class="btn" onclick="loadReadingProgress()">🔄 Refresh</button>
-    <button class="btn btn-danger" onclick="resetAllProgress()">🗑️ Reset All Positions</button>
-</div>
-
-<div id="progress-message" style="margin-top: 16px; display: none;"></div>

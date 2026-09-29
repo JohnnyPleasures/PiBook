@@ -1,0 +1,61 @@
+#!/bin/sh
+set -u
+
+DIR="/home/pi/PiBook/logs/boot-history"
+MAX_BOOTS=20
+
+BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
+FINAL="$DIR/boot-${BOOT_ID}.log.gz"
+TMP="$DIR/.boot-${BOOT_ID}.$$.tmp"
+
+mkdir -p "$DIR" || exit 1
+
+{
+    echo "=== PIBOOK BOOT HISTORY ==="
+    echo "version=2"
+    echo "archived_at=$(date --iso-8601=seconds 2>/dev/null || date)"
+    echo "boot_id=$BOOT_ID"
+    echo "kernel=$(uname -r)"
+    echo "uptime=$(cat /proc/uptime 2>/dev/null || true)"
+
+    printf 'tryboot='
+    if [ -r /proc/device-tree/chosen/bootloader/tryboot ]; then
+        od -An -tu4 /proc/device-tree/chosen/bootloader/tryboot \
+            2>/dev/null | tr -d ' \n'
+        echo
+    else
+        echo "unknown"
+    fi
+
+    echo
+    echo "=== CMDLINE ==="
+    cat /proc/cmdline 2>/dev/null || true
+
+    echo
+    echo "=== JOURNAL CURRENT BOOT ==="
+    journalctl -b -o short-monotonic --no-pager 2>&1 || true
+
+    echo
+    echo "=== DMESG ==="
+    dmesg 2>&1 || true
+} | gzip -1 > "$TMP"
+
+if [ ! -s "$TMP" ]; then
+    rm -f "$TMP"
+    exit 1
+fi
+
+mv -f "$TMP" "$FINAL"
+chmod 644 "$FINAL"
+chown pi:pi "$FINAL" 2>/dev/null || true
+
+COUNT=0
+for FILE in $(ls -1t "$DIR"/boot-*.log.gz 2>/dev/null); do
+    COUNT=$((COUNT + 1))
+    if [ "$COUNT" -gt "$MAX_BOOTS" ]; then
+        rm -f -- "$FILE"
+    fi
+done
+
+sync
+exit 0

@@ -1,0 +1,73 @@
+#!/bin/sh
+
+uptime_now()
+{
+    cut -d' ' -f1 /proc/uptime 2>/dev/null || echo unknown
+}
+
+log()
+{
+    echo "<6>PIBOOK_EARLY_SPLASH_HOOK t=$(uptime_now) $*" \
+        > /dev/kmsg 2>/dev/null || true
+}
+
+log "START"
+
+#
+# Esta pequena fase continua SINCRONA.
+# Primeiro garantimos que o hardware necessario existe.
+#
+
+if ! modprobe spi_bcm2835 >/dev/null 2>&1; then
+    log "ERROR modprobe_spi_bcm2835"
+    exit 0
+fi
+
+log "SPI_BCM2835_READY"
+
+if ! modprobe spidev >/dev/null 2>&1; then
+    log "ERROR modprobe_spidev"
+    exit 0
+fi
+
+log "SPIDEV_MODULE_READY"
+
+N=0
+
+while [ ! -e /dev/spidev0.0 ] && [ "$N" -lt 50 ]; do
+    sleep 0.02
+    N=$((N + 1))
+done
+
+if [ ! -e /dev/spidev0.0 ]; then
+    log "ERROR spidev0.0_missing"
+    exit 0
+fi
+
+if [ ! -e /dev/gpiochip0 ]; then
+    log "ERROR gpiochip0_missing"
+    exit 0
+fi
+
+log "HARDWARE_READY"
+
+#
+# Daqui para a frente o refresh do e-paper corre EM PARALELO.
+#
+# O helper escreve os seus proprios eventos em /dev/kmsg.
+# Nao fazemos wait: o initramfs pode continuar imediatamente.
+#
+
+/usr/bin/pibook-early-splash --run \
+    </dev/null \
+    >/dev/null \
+    2>&1 &
+
+PID=$!
+
+log "HELPER_LAUNCHED pid=$PID"
+
+#
+# Nunca bloquear o boot devido a splash.
+#
+exit 0

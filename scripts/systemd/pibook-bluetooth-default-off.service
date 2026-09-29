@@ -1,0 +1,10 @@
+[Unit]
+Description=PiBook Bluetooth default-off boot policy
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/rfkill block bluetooth
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

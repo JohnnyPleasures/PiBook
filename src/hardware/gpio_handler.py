@@ -8,6 +8,7 @@ import yaml
 import logging
 import time
 import threading
+import queue
 from typing import Callable, Dict, Optional
 
 
@@ -16,13 +17,13 @@ class GPIOHandler:
     Handle GPIO button inputs using gpiozero with short/long press detection
     """
 
-    def __init__(self, config_path: str, long_press_duration: float = 0.8):
+    def __init__(self, config_path: str, long_press_duration: float = 0.5):
         """
         Initialize GPIO handler
 
         Args:
             config_path: Path to GPIO configuration YAML
-            long_press_duration: Seconds to hold for long press (default 0.8s)
+            long_press_duration: Seconds to hold for long press (default 0.5s)
         """
         self.logger = logging.getLogger(__name__)
         self.callbacks: Dict[str, Callable] = {}
@@ -30,9 +31,21 @@ class GPIOHandler:
         self.buttons: Dict[str, Optional[object]] = {}
         self.long_press_duration = long_press_duration
         
-        # Track button press state
+        # Track physical button state independently from application work.
         self.press_start_time: Dict[str, Optional[float]] = {}
         self.long_press_triggered: Dict[str, bool] = {}
+        self._watching_press: Dict[str, bool] = {}
+        self._state_lock = threading.Lock()
+
+        # GPIO detection must never block on e-paper rendering/navigation.
+        self._event_queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._callback_thread = threading.Thread(
+            target=self._callback_worker,
+            daemon=True,
+            name="pibook-gpio-callbacks",
+        )
+        self._callback_thread.start()
 
         # Load configuration
         with open(config_path, 'r') as f:
@@ -60,6 +73,7 @@ class GPIOHandler:
                 self.buttons[button_name] = None
                 self.press_start_time[button_name] = None
                 self.long_press_triggered[button_name] = False
+                self._watching_press[button_name] = False
             self.logger.info("Mock GPIO buttons configured")
             return
 
@@ -76,6 +90,7 @@ class GPIOHandler:
                 )
                 self.press_start_time[button_name] = None
                 self.long_press_triggered[button_name] = False
+                self._watching_press[button_name] = False
                 self.logger.info(f"Configured button '{button_name}' on GPIO {pin}")
             except Exception as e:
                 self.logger.error(f"Failed to setup button '{button_name}': {e}")
@@ -104,54 +119,106 @@ class GPIOHandler:
 
         button = self.buttons[button_name]
         if button:
-            # Set up press and release handlers
+            # gpiozero only announces the beginning of a press. A dedicated
+            # watcher observes the physical state until release.
             button.when_pressed = lambda bn=button_name: self._on_button_press(bn)
-            button.when_released = lambda bn=button_name: self._on_button_release(bn)
+            button.when_released = None
 
     def _on_button_press(self, button_name: str):
-        """Handle button press event"""
-        self.press_start_time[button_name] = time.time()
-        self.long_press_triggered[button_name] = False
-        self.logger.debug(f"Button '{button_name}' pressed")
-        
-        # Start a thread to check for long press
+        """Start one non-blocking physical press watcher."""
+        with self._state_lock:
+            if self._watching_press.get(button_name, False):
+                return
+
+            self._watching_press[button_name] = True
+            self.press_start_time[button_name] = time.monotonic()
+            self.long_press_triggered[button_name] = False
+
         threading.Thread(
-            target=self._check_long_press,
+            target=self._watch_button_press,
             args=(button_name,),
-            daemon=True
+            daemon=True,
+            name=f"pibook-gpio-{button_name}",
         ).start()
 
-    def _check_long_press(self, button_name: str):
-        """Check if button is held long enough for long press"""
-        time.sleep(self.long_press_duration)
-        
-        # If button is still pressed after duration, trigger long press
-        if self.press_start_time[button_name] is not None:
-            button = self.buttons[button_name]
-            if button and button.is_pressed:
-                self.long_press_triggered[button_name] = True
-                if button_name in self.long_press_callbacks:
-                    self.logger.info(f"🔘 GPIO Button '{button_name}': LONG PRESS detected")
-                    self.long_press_callbacks[button_name]()
-
-    def _on_button_release(self, button_name: str):
-        """Handle button release event"""
-        if self.press_start_time[button_name] is None:
+    def _watch_button_press(self, button_name: str):
+        """Observe the actual GPIO state until release."""
+        button = self.buttons.get(button_name)
+        if not button:
             return
-        
-        press_duration = time.time() - self.press_start_time[button_name]
-        self.press_start_time[button_name] = None
-        
-        # If long press wasn't triggered, this is a short press
-        if not self.long_press_triggered[button_name]:
-            if button_name in self.callbacks:
-                self.logger.info(f"🔘 GPIO Button '{button_name}': SHORT PRESS detected ({press_duration:.2f}s)")
-                self.callbacks[button_name]()
-        else:
-            self.logger.debug(f"Button '{button_name}' released after long press")
+
+        started = time.monotonic()
+        long_triggered = False
+
+        try:
+            while not self._stop_event.is_set():
+                if not button.is_pressed:
+                    break
+
+                elapsed = time.monotonic() - started
+
+                if (
+                    not long_triggered
+                    and elapsed >= self.long_press_duration
+                ):
+                    long_triggered = True
+                    self.long_press_triggered[button_name] = True
+                    self.logger.info(
+                        "🔘 GPIO Button '%s': LONG PRESS detected (%.2fs)",
+                        button_name,
+                        elapsed,
+                    )
+                    self._event_queue.put((button_name, True))
+
+                time.sleep(0.01)
+
+            duration = time.monotonic() - started
+
+            if not long_triggered and not self._stop_event.is_set():
+                self.logger.info(
+                    "🔘 GPIO Button '%s': SHORT PRESS detected (%.2fs)",
+                    button_name,
+                    duration,
+                )
+                self._event_queue.put((button_name, False))
+
+        finally:
+            with self._state_lock:
+                self.press_start_time[button_name] = None
+                self.long_press_triggered[button_name] = False
+                self._watching_press[button_name] = False
+
+    def _callback_worker(self):
+        """Run application callbacks outside gpiozero event handling."""
+        while not self._stop_event.is_set():
+            try:
+                button_name, long_press = self._event_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            callbacks = (
+                self.long_press_callbacks
+                if long_press
+                else self.callbacks
+            )
+            callback = callbacks.get(button_name)
+
+            if callback:
+                try:
+                    callback()
+                except Exception:
+                    self.logger.exception(
+                        "Error in GPIO callback '%s' (long=%s)",
+                        button_name,
+                        long_press,
+                    )
+
+            self._event_queue.task_done()
 
     def cleanup(self):
-        """Clean up GPIO resources"""
+        """Clean up GPIO resources."""
+        self._stop_event.set()
+
         if not self.hardware_available:
             self.logger.debug("Mock GPIO cleanup")
             return

@@ -1,0 +1,7 @@
+{
+  "confirmation_delay_seconds": 12,
+  "cooldown_seconds": 300,
+  "max_recoveries_per_hour": 3,
+  "recovery_timeout_seconds": 210,
+  "post_recovery_delay_seconds": 8
+}

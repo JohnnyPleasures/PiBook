@@ -3,6 +3,7 @@ Settings Management Module
 Handles user settings persistence and access
 """
 
+import copy
 import json
 import os
 import logging
@@ -11,19 +12,112 @@ import logging
 class SettingsManager:
     """Manages user settings persistence"""
     
+    DEFAULT_POWER_PROFILES = {
+        'mains': {
+            'sleep': 'auto',
+            'sleep_timeout': 900,
+            'network_reading': 'auto',
+            'network_sleep': 'auto',
+            'reader_prefetch': 10,
+        },
+        'battery': {
+            'sleep': 'auto',
+            'sleep_timeout': 300,
+            'network_reading': 'auto',
+            'network_sleep': 'auto',
+            'reader_prefetch': 3,
+        },
+        'powersave': {
+            'sleep': 'auto',
+            'sleep_timeout': 120,
+            'network_reading': 'auto',
+            'network_sleep': 'auto',
+            'reader_prefetch': 1,
+        },
+    }
+
     DEFAULT_SETTINGS = {
         'zoom': 1.0,
         'full_refresh_interval': 5,
         'show_page_numbers': True,
-        'sleep_enabled': True,
         'sleep_message': "Shh I'm sleeping",
-        'sleep_timeout': 120,
         'shutdown_message': 'OFF',
-        'wifi_while_reading': False,
         'items_per_page': 4,
-        'undervolt': -2
+        'library_font_size': 20,
+
+        # Power profiles v2.
+        'power_mode': 'auto',
+        'auto_powersave_enabled': True,
+        'auto_powersave_threshold': 30,
+        'power_profiles': DEFAULT_POWER_PROFILES,
     }
     
+    def _migrate_power_profiles_v2(self, loaded):
+        """Migrate legacy energy settings and discard legacy keys."""
+        legacy_keys = {
+            'dpi',
+            'sleep_enabled',
+            'sleep_timeout',
+            'wifi_while_reading',
+            'power_profile',
+            'reader_prefetch_mains',
+            'reader_prefetch_battery',
+            'reader_prefetch_powersave',
+        }
+
+        if 'power_profiles' in loaded and 'power_mode' in loaded:
+            migrated = copy.deepcopy(loaded)
+            for key in legacy_keys:
+                migrated.pop(key, None)
+            return migrated
+
+        migrated = copy.deepcopy(loaded)
+
+        old_mode = str(
+            loaded.get('power_profile', 'battery')
+        ).strip().lower()
+
+        migrated['power_mode'] = (
+            'auto' if old_mode == 'battery'
+            else old_mode if old_mode in {'mains', 'powersave'}
+            else 'auto'
+        )
+
+        sleep = 'on' if bool(
+            loaded.get('sleep_enabled', True)
+        ) else 'off'
+
+        network = 'on' if bool(
+            loaded.get('wifi_while_reading', False)
+        ) else 'off'
+
+        timeout = int(loaded.get('sleep_timeout', 120))
+
+        profiles = copy.deepcopy(self.DEFAULT_POWER_PROFILES)
+
+        for name in ('mains', 'battery', 'powersave'):
+            profiles[name]['sleep'] = sleep
+            profiles[name]['sleep_timeout'] = timeout
+            profiles[name]['network_reading'] = network
+            profiles[name]['network_sleep'] = network
+
+        profiles['mains']['reader_prefetch'] = int(
+            loaded.get('reader_prefetch_mains', 10)
+        )
+        profiles['battery']['reader_prefetch'] = int(
+            loaded.get('reader_prefetch_battery', 3)
+        )
+        profiles['powersave']['reader_prefetch'] = int(
+            loaded.get('reader_prefetch_powersave', 1)
+        )
+
+        migrated['power_profiles'] = profiles
+
+        for key in legacy_keys:
+            migrated.pop(key, None)
+
+        return migrated
+
     def __init__(self, settings_file='settings.json', logger=None):
         """
         Initialize settings manager
@@ -42,17 +136,35 @@ class SettingsManager:
             try:
                 with open(self.settings_file, 'r') as f:
                     loaded_settings = json.load(f)
-                    # Merge with defaults to ensure all keys exist
-                    settings = self.DEFAULT_SETTINGS.copy()
+                    loaded_settings = self._migrate_power_profiles_v2(
+                        loaded_settings
+                    )
+
+                    settings = copy.deepcopy(self.DEFAULT_SETTINGS)
                     settings.update(loaded_settings)
+
+                    profiles = copy.deepcopy(
+                        self.DEFAULT_POWER_PROFILES
+                    )
+                    saved_profiles = settings.get(
+                        'power_profiles', {}
+                    )
+
+                    if isinstance(saved_profiles, dict):
+                        for name in profiles:
+                            saved = saved_profiles.get(name)
+                            if isinstance(saved, dict):
+                                profiles[name].update(saved)
+
+                    settings['power_profiles'] = profiles
                     return settings
             except Exception as e:
                 self.logger.warning(f"Failed to load settings: {e}. Using defaults.")
-                return self.DEFAULT_SETTINGS.copy()
+                return copy.deepcopy(self.DEFAULT_SETTINGS)
         else:
             # Create default settings file
-            self.save(self.DEFAULT_SETTINGS)
-            return self.DEFAULT_SETTINGS.copy()
+            self.save(copy.deepcopy(self.DEFAULT_SETTINGS))
+            return copy.deepcopy(self.DEFAULT_SETTINGS)
     
     def save(self, settings=None):
         """

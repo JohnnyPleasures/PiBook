@@ -1,0 +1,12 @@
+[Unit]
+Description=PiBook IP Scanner v2
+After=network.target
+ConditionPathExists=/etc/pibook-network/config.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pibook-ip-scanctl worker
+TimeoutStartSec=45
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal

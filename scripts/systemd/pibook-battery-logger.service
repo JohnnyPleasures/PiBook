@@ -1,0 +1,19 @@
+[Unit]
+Description=PiBook battery cycle logger
+After=pibook-zero.service
+Wants=pibook-zero.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/PiBook
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PIBOOK_BATTERY_LOG_INTERVAL=30
+ExecStart=/home/pi/PiBook/.venv/bin/python /home/pi/PiBook/tools/battery_cycle_logger.py
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

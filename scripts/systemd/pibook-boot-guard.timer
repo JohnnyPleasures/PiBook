@@ -1,0 +1,10 @@
+[Unit]
+Description=PiBook automatic boot rollback timer
+
+[Timer]
+OnBootSec=120s
+AccuracySec=1s
+Unit=pibook-boot-guard.service
+
+[Install]
+WantedBy=timers.target

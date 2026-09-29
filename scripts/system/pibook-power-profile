@@ -1,0 +1,49 @@
+#!/bin/bash
+set -euo pipefail
+
+PROFILE="${1:-}"
+
+case "$PROFILE" in
+    mains)
+        INTERVAL="60s"
+        ;;
+    battery)
+        INTERVAL="180s"
+        ;;
+    powersave)
+        INTERVAL="600s"
+        ;;
+    *)
+        echo "Perfil inválido: $PROFILE" >&2
+        exit 2
+        ;;
+esac
+
+DROPIN_DIR="/etc/systemd/system/pibook-network-watchdog.timer.d"
+DROPIN_FILE="$DROPIN_DIR/power-profile.conf"
+
+mkdir -p "$DROPIN_DIR"
+
+DESIRED_CONTENT="[Timer]
+OnActiveSec=
+OnUnitActiveSec=
+OnActiveSec=$INTERVAL
+OnUnitActiveSec=$INTERVAL
+AccuracySec=5s"
+
+CURRENT_CONTENT=""
+if [ -f "$DROPIN_FILE" ]; then
+    CURRENT_CONTENT="$(cat "$DROPIN_FILE")"
+fi
+
+if [ "$CURRENT_CONTENT" = "$DESIRED_CONTENT" ]; then
+    echo "Perfil $PROFILE já aplicado: watchdog=$INTERVAL"
+    exit 0
+fi
+
+printf "%s\n" "$DESIRED_CONTENT" >"$DROPIN_FILE"
+
+systemctl daemon-reload
+systemctl restart pibook-network-watchdog.timer
+
+echo "Perfil $PROFILE aplicado: watchdog=$INTERVAL"

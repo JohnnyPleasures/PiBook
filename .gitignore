@@ -20,42 +20,55 @@ wheels/
 *.egg
 
 # Virtual environments
+.venv/
 venv/
 ENV/
 env/
 
-# IDE
+# IDE / editor
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Logs
-*.log
-logs/*.log
-
-# Cache
-cache/
+# PiBook runtime and development artifacts
+/backups/
+/diagnostics/
+/data/*
+!/data/.gitkeep
+/todos.json
+/logs/*
+!/logs/.gitkeep
+/cache/
 *.cache
+/output/
 
-# Books (don't commit EPUBs)
-books/*.epub
+# Books - never commit personal EPUBs
+/books/*.epub
 
-# Output
-output/
-# Ignore PNG files except for assets
+# Third-party Waveshare source/runtime copies
+/lib/e-Paper/
+/lib/waveshare_epd/
+
+# PNG files outside approved asset/document locations
 *.png
 !assets/**/*.png
 !src/web/static/images/*.png
 !docs/**/*.png
 
-# Waveshare library (downloaded during install)
-lib/e-Paper/
-
 # OS
 .DS_Store
 Thumbs.db
 
-# Config overrides
-config/local.yaml
+# Local config overrides
+/config/local.yaml
+
+# User/runtime settings
+/settings.json
+
+# Generated installation/build artifacts
+/build/
+
+# Local AI/development settings
+/.claude/settings.local.json

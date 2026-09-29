@@ -1,0 +1,1210 @@
+#!/usr/bin/env python3
+"""Pesquisa temporária de redes Wi-Fi para o PiBook.
+
+O Raspberry Pi Zero W possui uma só interface Wi-Fi. Durante a pesquisa,
+o hotspot é interrompido, a wlan0 passa temporariamente para o
+NetworkManager e, no fim, o hotspot WPA2 é restaurado.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import json
+import logging
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any, Iterable
+
+CONFIG_PATH = Path("/etc/pibook-network/config.json")
+STATE_PATH = Path("/var/lib/pibook-network/state.json")
+RESULTS_PATH = Path("/var/lib/pibook-network/scan_results.json")
+WEB_STATE_PATH = Path("/var/lib/pibook-network-web/state.json")
+WEB_RESULTS_PATH = Path("/var/lib/pibook-network-web/scan_results.json")
+LOCK_PATH = Path("/run/lock/pibook-network.lock")
+LOG_PATH = Path("/var/log/pibook-wifi-scan.log")
+
+SCAN_SERVICE = "pibook-wifi-scan.service"
+RECOVERY_UNIT = "pibook-wifi-scan-recovery"
+TEST_RESTORE_UNIT = "pibook-network-test-restore"
+HOSTAPD_SERVICE = "pibook-network-hostapd.service"
+DNSMASQ_SERVICE = "pibook-network-dnsmasq.service"
+
+
+class ScanError(RuntimeError):
+    pass
+
+
+def now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(
+        timespec="seconds"
+    )
+
+
+def setup_logging() -> logging.Logger:
+    logger = logging.getLogger("pibook-wifi-scan")
+    logger.setLevel(logging.INFO)
+
+    if not logger.handlers:
+        formatter = logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s"
+        )
+        try:
+            handler: logging.Handler = logging.FileHandler(LOG_PATH)
+        except OSError:
+            handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
+
+
+LOGGER = setup_logging()
+
+
+def run(
+    command: Iterable[str],
+    *,
+    check: bool = True,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess[str]:
+    args = [str(part) for part in command]
+    LOGGER.info("Executar: %s", " ".join(args))
+
+    try:
+        result = subprocess.run(
+            args,
+            check=False,
+            timeout=timeout,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ScanError(
+            f"Tempo excedido ao executar: {' '.join(args)}"
+        ) from exc
+
+    if check and result.returncode != 0:
+        details = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"código {result.returncode}"
+        )
+        raise ScanError(
+            f"Falhou {' '.join(args)}: {details}"
+        )
+
+    return result
+
+
+def service_active(name: str) -> bool:
+    return run(
+        ["systemctl", "is-active", "--quiet", name],
+        check=False,
+        timeout=15,
+    ).returncode == 0
+
+
+def atomic_json_write(
+    path: Path,
+    payload: dict[str, Any],
+    mode: int,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=str(path.parent),
+        text=True,
+    )
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(
+                payload,
+                handle,
+                indent=2,
+                ensure_ascii=False,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+
+
+def read_json(
+    path: Path,
+    default: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return dict(default)
+
+    return value if isinstance(value, dict) else dict(default)
+
+
+def load_config() -> dict[str, Any]:
+    config = read_json(CONFIG_PATH, {})
+    required = {
+        "interface",
+        "hotspot_ssid",
+        "hotspot_address",
+    }
+    missing = sorted(required - set(config))
+
+    if missing:
+        raise ScanError(
+            "Configuração incompleta: " + ", ".join(missing)
+        )
+
+    return config
+
+
+def update_main_state(**updates: Any) -> None:
+    state = read_json(STATE_PATH, {})
+    state.update(updates)
+    state["updated_at"] = now_iso()
+    atomic_json_write(STATE_PATH, state, 0o600)
+    try:
+        atomic_json_write(WEB_STATE_PATH, state, 0o640)
+    except OSError as exc:
+        LOGGER.warning(
+            "Não foi possível atualizar o estado Web: %s",
+            exc,
+        )
+
+
+def write_results(payload: dict[str, Any]) -> None:
+    atomic_json_write(RESULTS_PATH, payload, 0o600)
+    try:
+        atomic_json_write(WEB_RESULTS_PATH, payload, 0o640)
+    except OSError as exc:
+        LOGGER.warning(
+            "Não foi possível atualizar os resultados Web: %s",
+            exc,
+        )
+
+
+def load_results() -> dict[str, Any]:
+    return read_json(
+        RESULTS_PATH,
+        {
+            "status": "never",
+            "started_at": "",
+            "generated_at": "",
+            "duration_seconds": 0,
+            "count": 0,
+            "networks": [],
+            "error": "",
+            "hotspot_restored": False,
+        },
+    )
+
+
+@contextlib.contextmanager
+def shared_lock() -> Any:
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    with LOCK_PATH.open("w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        raise ScanError(
+            "Este comando altera a rede e tem de ser executado com sudo."
+        )
+
+
+def interface_type(interface: str) -> str:
+    result = run(
+        ["iw", "dev", interface, "info"],
+        check=False,
+        timeout=15,
+    )
+
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("type "):
+            return stripped.split(maxsplit=1)[1]
+
+    return ""
+
+
+def ipv4_addresses(interface: str) -> list[str]:
+    result = run(
+        ["ip", "-4", "-o", "address", "show", "dev", interface],
+        check=False,
+        timeout=15,
+    )
+
+    addresses: list[str] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if "inet" not in parts:
+            continue
+        index = parts.index("inet")
+        if index + 1 < len(parts):
+            addresses.append(parts[index + 1])
+
+    return addresses
+
+
+def nm_value(interface: str, field: str) -> str:
+    result = run(
+        ["nmcli", "-g", field, "device", "show", interface],
+        check=False,
+        timeout=20,
+    )
+    return result.stdout.strip()
+
+
+def hotspot_is_active(config: dict[str, Any]) -> bool:
+    interface = str(config["interface"])
+    return (
+        service_active(HOSTAPD_SERVICE)
+        and service_active(DNSMASQ_SERVICE)
+        and interface_type(interface) == "AP"
+        and str(config["hotspot_address"]) in ipv4_addresses(interface)
+    )
+
+
+def wait_for(
+    predicate: Any,
+    *,
+    attempts: int,
+    interval: float,
+    description: str,
+) -> None:
+    for _ in range(attempts):
+        if predicate():
+            return
+        time.sleep(interval)
+
+    raise ScanError(
+        f"Tempo excedido à espera de {description}."
+    )
+
+
+def cancel_unit_pair(base: str) -> None:
+    run(
+        [
+            "systemctl",
+            "stop",
+            f"{base}.timer",
+            f"{base}.service",
+        ],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["systemctl", "reset-failed", f"{base}.service"],
+        check=False,
+        timeout=20,
+    )
+
+
+def schedule_recovery(seconds: int = 170) -> None:
+    cancel_unit_pair(RECOVERY_UNIT)
+
+    run(
+        [
+            "systemd-run",
+            "--quiet",
+            f"--unit={RECOVERY_UNIT}",
+            f"--on-active={seconds}s",
+            "--timer-property=AccuracySec=5s",
+            "--collect",
+            "/usr/local/sbin/pibook-networkctl",
+            "hotspot",
+        ],
+        timeout=30,
+    )
+
+
+def split_nmcli_escaped(line: str) -> list[str]:
+    fields: list[str] = []
+    buffer: list[str] = []
+    escaped = False
+
+    for character in line:
+        if escaped:
+            buffer.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == ":":
+            fields.append("".join(buffer))
+            buffer = []
+        else:
+            buffer.append(character)
+
+    if escaped:
+        buffer.append("\\")
+
+    fields.append("".join(buffer))
+    return fields
+
+
+def stop_hotspot() -> None:
+    run(
+        ["systemctl", "stop", DNSMASQ_SERVICE],
+        check=False,
+        timeout=30,
+    )
+    run(
+        ["systemctl", "stop", HOSTAPD_SERVICE],
+        check=False,
+        timeout=30,
+    )
+    run(
+        ["systemctl", "reset-failed", DNSMASQ_SERVICE],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["systemctl", "reset-failed", HOSTAPD_SERVICE],
+        check=False,
+        timeout=20,
+    )
+
+
+def prepare_scan_mode(config: dict[str, Any]) -> None:
+    interface = str(config["interface"])
+
+    stop_hotspot()
+
+    run(
+        ["ip", "link", "set", interface, "down"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "address", "flush", "dev", interface],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["iw", "dev", interface, "set", "type", "managed"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "link", "set", interface, "up"],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["systemctl", "start", "wpa_supplicant.service"],
+        check=False,
+        timeout=30,
+    )
+
+    run(
+        ["systemctl", "start", "NetworkManager.service"],
+        check=False,
+        timeout=60,
+    )
+    wait_for(
+        lambda: service_active("NetworkManager.service"),
+        attempts=30,
+        interval=1,
+        description="NetworkManager ativo para operação Wi-Fi",
+    )
+
+    run(
+        ["nmcli", "device", "set", interface, "managed", "yes"],
+        check=False,
+        timeout=25,
+    )
+    run(
+        ["nmcli", "radio", "wifi", "on"],
+        check=False,
+        timeout=20,
+    )
+
+    wait_for(
+        lambda: (
+            bool(nm_value(interface, "GENERAL.STATE"))
+            and not nm_value(
+                interface,
+                "GENERAL.STATE",
+            ).startswith("10")
+        ),
+        attempts=20,
+        interval=2,
+        description="NetworkManager reconhecer a wlan0",
+    )
+
+    run(
+        ["nmcli", "device", "set", interface, "autoconnect", "no"],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["nmcli", "device", "disconnect", interface],
+        check=False,
+        timeout=30,
+    )
+    time.sleep(3)
+
+
+def perform_scan(config: dict[str, Any]) -> list[dict[str, Any]]:
+    interface = str(config["interface"])
+
+    run(
+        [
+            "nmcli",
+            "--wait",
+            "45",
+            "device",
+            "wifi",
+            "rescan",
+            "ifname",
+            interface,
+        ],
+        check=False,
+        timeout=55,
+    )
+    time.sleep(4)
+
+    result = run(
+        [
+            "nmcli",
+            "--terse",
+            "--escape",
+            "yes",
+            "--fields",
+            "SSID,BSSID,CHAN,SIGNAL,SECURITY",
+            "device",
+            "wifi",
+            "list",
+            "ifname",
+            interface,
+            "--rescan",
+            "yes",
+        ],
+        timeout=65,
+    )
+
+    grouped: dict[str, dict[str, Any]] = {}
+
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+
+        fields = split_nmcli_escaped(line)
+        if len(fields) != 5:
+            LOGGER.warning("Linha inesperada do nmcli: %r", line)
+            continue
+
+        ssid, bssid, channel_text, signal_text, security = fields
+
+        try:
+            channel = int(channel_text)
+        except ValueError:
+            channel = 0
+
+        try:
+            signal = max(0, min(100, int(signal_text)))
+        except ValueError:
+            signal = 0
+
+        hidden = not bool(ssid)
+        key = ssid.casefold() if ssid else f"hidden:{bssid.lower()}"
+        normalized_security = security.strip()
+
+        item: dict[str, Any] = {
+            "ssid": ssid,
+            "display_ssid": ssid if ssid else "Rede oculta",
+            "hidden": hidden,
+            "bssid": bssid,
+            "channel": channel,
+            "signal": signal,
+            "security": normalized_security,
+            "open": normalized_security in {"", "--"},
+            "access_points": 1,
+        }
+
+        previous = grouped.get(key)
+        if previous is None:
+            grouped[key] = item
+            continue
+
+        access_points = int(previous["access_points"]) + 1
+
+        if signal > int(previous["signal"]):
+            item["access_points"] = access_points
+            grouped[key] = item
+        else:
+            previous["access_points"] = access_points
+
+    networks = list(grouped.values())
+    networks.sort(
+        key=lambda item: (
+            -int(item["signal"]),
+            str(item["display_ssid"]).casefold(),
+        )
+    )
+    return networks
+
+
+def current_wifi_uuid(interface: str) -> str:
+    value = nm_value(interface, "GENERAL.CON-UUID")
+    return "" if value == "--" else value
+
+
+def restore_hotspot(config: dict[str, Any]) -> None:
+    interface = str(config["interface"])
+    hotspot_address = str(config["hotspot_address"])
+
+    run(
+        ["nmcli", "device", "set", interface, "autoconnect", "yes"],
+        check=False,
+        timeout=20,
+    )
+
+    wifi_uuid = current_wifi_uuid(interface)
+    if wifi_uuid:
+        run(
+            ["nmcli", "connection", "down", "uuid", wifi_uuid],
+            check=False,
+            timeout=45,
+        )
+
+    run(
+        ["nmcli", "device", "disconnect", interface],
+        check=False,
+        timeout=30,
+    )
+    run(
+        ["nmcli", "device", "set", interface, "managed", "no"],
+        timeout=25,
+    )
+
+    run(
+        ["systemctl", "stop", "NetworkManager.service"],
+        check=False,
+        timeout=40,
+    )
+    wait_for(
+        lambda: not service_active("NetworkManager.service"),
+        attempts=20,
+        interval=0.5,
+        description="NetworkManager parado para regressar ao hotspot",
+    )
+
+    run(
+        ["systemctl", "stop", "wpa_supplicant.service"],
+        check=False,
+        timeout=30,
+    )
+    time.sleep(2)
+
+    run(
+        ["rfkill", "unblock", "wifi"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "link", "set", interface, "down"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "address", "flush", "dev", interface],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["iw", "dev", interface, "set", "type", "managed"],
+        check=False,
+        timeout=15,
+    )
+    run(
+        ["ip", "link", "set", interface, "up"],
+        timeout=20,
+    )
+
+    run(
+        ["systemctl", "start", HOSTAPD_SERVICE],
+        timeout=30,
+    )
+    wait_for(
+        lambda: (
+            service_active(HOSTAPD_SERVICE)
+            and interface_type(interface) == "AP"
+        ),
+        attempts=25,
+        interval=2,
+        description="hostapd em modo AP",
+    )
+
+    run(
+        ["ip", "address", "flush", "dev", interface],
+        check=False,
+        timeout=15,
+    )
+    run(
+        [
+            "ip",
+            "address",
+            "add",
+            hotspot_address,
+            "dev",
+            interface,
+        ],
+        timeout=20,
+    )
+    run(
+        ["ip", "link", "set", interface, "up"],
+        timeout=20,
+    )
+    run(
+        ["systemctl", "start", DNSMASQ_SERVICE],
+        timeout=30,
+    )
+
+    wait_for(
+        lambda: hotspot_is_active(config),
+        attempts=20,
+        interval=2,
+        description="restauro completo do hotspot",
+    )
+
+
+def wifi_connection_is_active(
+    config: dict[str, Any],
+    wifi_uuid: str,
+) -> bool:
+    interface = str(config["interface"])
+
+    return bool(
+        wifi_uuid
+        and service_active("NetworkManager.service")
+        and current_wifi_uuid(interface) == wifi_uuid
+        and ipv4_addresses(interface)
+    )
+
+
+def restore_wifi(
+    config: dict[str, Any],
+    wifi_uuid: str,
+) -> None:
+    interface = str(config["interface"])
+
+    if not wifi_uuid:
+        raise ScanError(
+            "Não existe uma ligação Wi-Fi anterior para restaurar."
+        )
+
+    run(
+        ["systemctl", "start", "wpa_supplicant.service"],
+        check=False,
+        timeout=30,
+    )
+    run(
+        ["systemctl", "start", "NetworkManager.service"],
+        check=False,
+        timeout=60,
+    )
+
+    run(
+        ["nmcli", "device", "set", interface, "managed", "yes"],
+        check=False,
+        timeout=25,
+    )
+    run(
+        ["nmcli", "device", "set", interface, "autoconnect", "yes"],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["nmcli", "radio", "wifi", "on"],
+        check=False,
+        timeout=20,
+    )
+
+    if not wifi_connection_is_active(config, wifi_uuid):
+        run(
+            [
+                "nmcli",
+                "--wait",
+                "45",
+                "connection",
+                "up",
+                "uuid",
+                wifi_uuid,
+                "ifname",
+                interface,
+            ],
+            timeout=55,
+        )
+
+    wait_for(
+        lambda: wifi_connection_is_active(config, wifi_uuid),
+        attempts=30,
+        interval=1,
+        description="restauro da ligação Wi-Fi anterior",
+    )
+
+
+def start_scan(config: dict[str, Any]) -> dict[str, Any]:
+    require_root()
+
+    if service_active(SCAN_SERVICE):
+        raise ScanError("Já existe uma pesquisa em curso.")
+
+    interface = str(config["interface"])
+
+    if hotspot_is_active(config):
+        restore_mode = "hotspot"
+        restore_wifi_uuid = ""
+    else:
+        restore_wifi_uuid = current_wifi_uuid(interface)
+
+        if (
+            not service_active("NetworkManager.service")
+            or not restore_wifi_uuid
+        ):
+            raise ScanError(
+                "O PiBook não está num estado de rede adequado para pesquisar."
+            )
+
+        restore_mode = "wifi"
+
+    cancel_unit_pair(TEST_RESTORE_UNIT)
+
+    # Só precisamos do restauro de segurança quando vamos desmontar
+    # temporariamente o hotspot.
+    if restore_mode == "hotspot":
+        schedule_recovery()
+
+    started_at = now_iso()
+
+    update_main_state(
+        desired_mode=restore_mode,
+        actual_mode=restore_mode,
+        operation="scan_queued",
+        last_scan_status="queued",
+        last_scan_started_at=started_at,
+        last_scan_completed_at="",
+        last_scan_error="",
+        last_error="",
+    )
+
+    write_results(
+        {
+            "status": "queued",
+            "started_at": started_at,
+            "generated_at": "",
+            "duration_seconds": 0,
+            "count": 0,
+            "networks": [],
+            "error": "",
+            "restore_mode": restore_mode,
+            "restore_wifi_uuid": restore_wifi_uuid,
+            "hotspot_restored": restore_mode == "hotspot",
+            "wifi_restored": restore_mode == "wifi",
+        }
+    )
+
+    run(
+        ["systemctl", "reset-failed", SCAN_SERVICE],
+        check=False,
+        timeout=20,
+    )
+    run(
+        ["systemctl", "--no-block", "start", SCAN_SERVICE],
+        timeout=25,
+    )
+
+    if restore_mode == "hotspot":
+        message = (
+            "O hotspot será interrompido temporariamente e "
+            "restaurado quando a pesquisa terminar."
+        )
+    else:
+        message = (
+            "A pesquisa foi iniciada mantendo a ligação Wi-Fi atual."
+        )
+
+    return {
+        "started": True,
+        "restore_mode": restore_mode,
+        "message": message,
+        "results_command": "sudo pibook-wifi-scanctl results",
+    }
+
+
+
+def worker(config: dict[str, Any]) -> dict[str, Any]:
+    require_root()
+
+    queued = load_results()
+    restore_mode = str(
+        queued.get("restore_mode") or "hotspot"
+    )
+    restore_wifi_uuid = str(
+        queued.get("restore_wifi_uuid") or ""
+    )
+
+    if restore_mode not in {"hotspot", "wifi"}:
+        raise ScanError(
+            f"Modo de restauro inválido: {restore_mode}"
+        )
+
+    started_at = now_iso()
+    started_monotonic = time.monotonic()
+    networks: list[dict[str, Any]] = []
+    scan_error = ""
+    restored = False
+
+    with shared_lock():
+        interface = str(config["interface"])
+
+        if restore_mode == "hotspot":
+            if not hotspot_is_active(config):
+                raise ScanError(
+                    "O worker iniciou sem o hotspot ativo."
+                )
+        else:
+            if not wifi_connection_is_active(
+                config,
+                restore_wifi_uuid,
+            ):
+                raise ScanError(
+                    "A ligação Wi-Fi original já não está ativa."
+                )
+
+        update_main_state(
+            desired_mode=restore_mode,
+            actual_mode="transition",
+            operation="scanning",
+            last_scan_status="running",
+            last_scan_started_at=started_at,
+            last_scan_completed_at="",
+            last_scan_error="",
+            last_error="",
+        )
+
+        try:
+            if restore_mode == "hotspot":
+                prepare_scan_mode(config)
+
+            # Em Wi-Fi, a wlan0 já está em managed sob controlo do
+            # NetworkManager. O scan é feito diretamente, sem desligar.
+            networks = perform_scan(config)
+
+        except Exception as exc:
+            scan_error = str(exc)
+            LOGGER.exception("Falha durante a pesquisa")
+
+        finally:
+            try:
+                if restore_mode == "hotspot":
+                    restore_hotspot(config)
+                    restored = hotspot_is_active(config)
+                else:
+                    restore_wifi(
+                        config,
+                        restore_wifi_uuid,
+                    )
+                    restored = wifi_connection_is_active(
+                        config,
+                        restore_wifi_uuid,
+                    )
+
+            except Exception:
+                LOGGER.exception(
+                    "Falha ao restaurar o modo de rede após a pesquisa"
+                )
+
+            completed_at = now_iso()
+            duration = round(
+                time.monotonic() - started_monotonic,
+                1,
+            )
+            status = "error" if scan_error else "success"
+
+            payload = {
+                "status": status,
+                "started_at": started_at,
+                "generated_at": completed_at,
+                "duration_seconds": duration,
+                "count": len(networks),
+                "networks": networks,
+                "error": scan_error,
+                "restore_mode": restore_mode,
+                "restore_wifi_uuid": restore_wifi_uuid,
+                "hotspot_restored": (
+                    restore_mode == "hotspot" and restored
+                ),
+                "wifi_restored": (
+                    restore_mode == "wifi" and restored
+                ),
+            }
+
+            write_results(payload)
+
+            if restored:
+                if restore_mode == "hotspot":
+                    cancel_unit_pair(RECOVERY_UNIT)
+
+                update_main_state(
+                    desired_mode=restore_mode,
+                    actual_mode=restore_mode,
+                    operation="idle",
+                    last_scan_status=status,
+                    last_scan_count=len(networks),
+                    last_scan_started_at=started_at,
+                    last_scan_completed_at=completed_at,
+                    last_scan_error=scan_error,
+                    last_error="",
+                )
+
+            elif restore_mode == "hotspot":
+                update_main_state(
+                    desired_mode="hotspot",
+                    actual_mode="transition",
+                    operation="scan_recovery_pending",
+                    last_scan_status=status,
+                    last_scan_count=len(networks),
+                    last_scan_started_at=started_at,
+                    last_scan_completed_at=completed_at,
+                    last_scan_error=scan_error,
+                    last_error=(
+                        "O restauro de segurança do hotspot "
+                        "permanece programado."
+                    ),
+                )
+
+            else:
+                update_main_state(
+                    desired_mode="wifi",
+                    actual_mode="transition",
+                    operation="scan_restore_failed",
+                    last_scan_status=status,
+                    last_scan_count=len(networks),
+                    last_scan_started_at=started_at,
+                    last_scan_completed_at=completed_at,
+                    last_scan_error=scan_error,
+                    last_error=(
+                        "Não foi possível confirmar o restauro "
+                        "da ligação Wi-Fi anterior."
+                    ),
+                )
+
+    if not restored:
+        if restore_mode == "hotspot":
+            raise ScanError(
+                "A pesquisa terminou sem restaurar imediatamente "
+                "o hotspot."
+            )
+
+        raise ScanError(
+            "A pesquisa terminou sem restaurar a ligação Wi-Fi anterior."
+        )
+
+    if scan_error:
+        restored_label = (
+            "O hotspot"
+            if restore_mode == "hotspot"
+            else "A ligação Wi-Fi"
+        )
+
+        raise ScanError(
+            f"{restored_label} foi restaurado, "
+            f"mas a pesquisa falhou: {scan_error}"
+        )
+
+    return load_results()
+
+
+def print_results(as_json: bool) -> None:
+    payload = load_results()
+
+    if as_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    print("PiBook — resultados da pesquisa Wi-Fi")
+    print("=" * 72)
+    print(f"Estado:          {payload.get('status', 'desconhecido')}")
+    print(f"Data:            {payload.get('generated_at') or 'ainda não'}")
+    print(f"Duração:         {payload.get('duration_seconds', 0)} s")
+    print(f"Redes:           {payload.get('count', 0)}")
+    print(
+        "Hotspot:         "
+        + (
+            "restaurado"
+            if payload.get("hotspot_restored")
+            else "não confirmado"
+        )
+    )
+
+    error = str(payload.get("error", ""))
+    if error:
+        print(f"Erro:            {error}")
+
+    networks = payload.get("networks", [])
+    if not isinstance(networks, list) or not networks:
+        return
+
+    print()
+    print(f"{'SINAL':>5}  {'SEGURANÇA':<18}  {'CANAL':>5}  SSID")
+    print("-" * 72)
+
+    for network in networks:
+        signal = int(network.get("signal", 0))
+        security = str(network.get("security", "")) or "Aberta"
+        channel = int(network.get("channel", 0))
+        ssid = str(network.get("display_ssid", "Rede oculta"))
+        access_points = int(network.get("access_points", 1))
+        suffix = f" ({access_points} AP)" if access_points > 1 else ""
+
+        print(
+            f"{signal:>4}%  {security[:18]:<18}  "
+            f"{channel:>5}  {ssid}{suffix}"
+        )
+
+
+def print_status(config: dict[str, Any], as_json: bool) -> None:
+    payload = {
+        "scan_service_active": service_active(SCAN_SERVICE),
+        "recovery_timer_active": service_active(
+            f"{RECOVERY_UNIT}.timer"
+        ),
+        "hotspot_active": hotspot_is_active(config),
+        "results": load_results(),
+    }
+
+    if as_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    print("PiBook — estado da pesquisa Wi-Fi")
+    print("=" * 56)
+    print(
+        "Pesquisa:        "
+        + (
+            "em curso"
+            if payload["scan_service_active"]
+            else "inativa"
+        )
+    )
+    print(
+        "Recuperação:     "
+        + (
+            "programada"
+            if payload["recovery_timer_active"]
+            else "não"
+        )
+    )
+    print(
+        "Hotspot:         "
+        + (
+            "ativo"
+            if payload["hotspot_active"]
+            else "inativo/transição"
+        )
+    )
+    print(
+        "Último estado:   "
+        + str(payload["results"].get("status", "never"))
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Pesquisa Wi-Fi temporária do PiBook"
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+    )
+
+    subparsers.add_parser(
+        "start",
+        help="Iniciar pesquisa e regressar ao hotspot",
+    )
+    subparsers.add_parser(
+        "worker",
+        help=argparse.SUPPRESS,
+    )
+
+    results_parser = subparsers.add_parser(
+        "results",
+        help="Mostrar os últimos resultados",
+    )
+    results_parser.add_argument(
+        "--json",
+        action="store_true",
+    )
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Mostrar o estado da pesquisa",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> int:
+    try:
+        config = load_config()
+        args = parse_args()
+
+        if args.command == "start":
+            result = start_scan(config)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
+        if args.command == "worker":
+            result = worker(config)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
+        if args.command == "results":
+            print_results(args.json)
+            return 0
+
+        if args.command == "status":
+            print_status(config, args.json)
+            return 0
+
+        raise ScanError("Comando desconhecido.")
+
+    except ScanError as exc:
+        LOGGER.error("%s", exc)
+        print(f"ERRO: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        LOGGER.exception("Erro inesperado")
+        print(f"ERRO inesperado: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

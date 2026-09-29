@@ -10,6 +10,9 @@ import os
 import logging
 import socket
 import subprocess
+import threading
+
+from src.utils.epub_metadata import get_epub_title
 
 
 def get_ip_address():
@@ -99,28 +102,28 @@ class MainMenuScreen:
         # Define available apps
         self.apps = [
             {
-                'name': 'eReader',
+                'name': 'Livros',
                 'icon_filename': 'ereader.png',
-                'description': 'Read EPUB books',
+                'description': 'Biblioteca EPUB',
                 'screen': 'library'
             },
             {
-                'name': 'IP Scanner',
-                'icon_filename': 'ip_scanner.png',
-                'description': 'Scan network devices',
-                'screen': 'ip_scanner'
+                'name': 'Continuar',
+                'icon_filename': 'ereader.png',
+                'description': 'Retomar última leitura',
+                'screen': 'continue'
+            },
+            {
+                'name': 'Wi-Fi',
+                'icon_filename': 'wifi.png',
+                'description': 'Rede, Klipper e IP Scanner',
+                'screen': 'wifi'
             },
             {
                 'name': 'To Do',
                 'icon_filename': 'todo.png',
                 'description': 'Manage tasks',
                 'screen': 'todo'
-            },
-            {
-                'name': 'Klipper',
-                'icon_filename': 'klipper.png',
-                'description': 'Monitor 3D printers',
-                'screen': 'klipper'
             },
             {
                 'name': 'Terminal',
@@ -136,36 +139,77 @@ class MainMenuScreen:
             }
         ]
 
-        # Pre-load icons
+        # Pre-load icons. Prefer boot-ready 120x120/1-bit versions so the
+        # Pi Zero does not resize and quantize large PNGs on every startup.
+        # Originals remain the automatic fallback.
         self.icons = {}
-        icon_size = (120, 120)  # Standard size for icons
-        
-        # Calculate absolute path to assets directory
-        # __file__ is src/ui/screens.py
-        # Go up 2 levels: src/ui -> src -> PiBook (project root)
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        icon_size = (120, 120)
+
+        # __file__ is src/ui/screens.py -> project root is two levels above src.
+        project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
         assets_dir = os.path.join(project_root, 'assets', 'icons')
-        
+        boot_cache_dir = os.path.join(assets_dir, 'boot_cache')
+
         self.logger.info(f"Looking for icons in: {assets_dir}")
 
+        # Livros and Continuar share ereader.png; decode each filename once.
+        loaded_by_filename = {}
+
         for app in self.apps:
+            filename = app['icon_filename']
+
             try:
-                icon_path = os.path.join(assets_dir, app['icon_filename'])
-                if os.path.exists(icon_path):
-                    img = Image.open(icon_path)
-                    # Resize if needed
-                    if img.size != icon_size:
-                        img = img.resize(icon_size, Image.Resampling.LANCZOS)
-                    # Convert to grayscale first, then to 1-bit for e-ink display
-                    if img.mode != '1':
-                        img = img.convert('L')  # Convert to grayscale
-                        img = img.point(lambda x: 0 if x < 128 else 255, '1')  # Convert to 1-bit
-                    self.icons[app['name']] = img
-                    self.logger.info(f"Loaded icon for {app['name']}")
-                else:
-                    self.logger.warning(f"Icon not found: {icon_path}")
+                if filename in loaded_by_filename:
+                    self.icons[app['name']] = loaded_by_filename[filename]
+                    self.logger.info(
+                        f"Reused icon for {app['name']}: {filename}"
+                    )
+                    continue
+
+                cached_path = os.path.join(boot_cache_dir, filename)
+                original_path = os.path.join(assets_dir, filename)
+                icon_path = (
+                    cached_path
+                    if os.path.exists(cached_path)
+                    else original_path
+                )
+
+                if not os.path.exists(icon_path):
+                    self.logger.warning(f"Icon not found: {original_path}")
+                    continue
+
+                with Image.open(icon_path) as source:
+                    img = source.copy()
+
+                # Fallback originals still get exactly the old transformation.
+                if img.size != icon_size:
+                    img = img.resize(icon_size, Image.Resampling.LANCZOS)
+
+                if img.mode != '1':
+                    img = img.convert('L')
+                    img = img.point(
+                        lambda x: 0 if x < 128 else 255,
+                        '1',
+                    )
+
+                loaded_by_filename[filename] = img
+                self.icons[app['name']] = img
+
+                source_kind = (
+                    "boot cache"
+                    if icon_path == cached_path
+                    else "original"
+                )
+                self.logger.info(
+                    f"Loaded icon for {app['name']} from {source_kind}"
+                )
+
             except Exception as e:
-                self.logger.error(f"Failed to load icon for {app['name']}: {e}")
+                self.logger.error(
+                    f"Failed to load icon for {app['name']}: {e}"
+                )
 
         self.current_index = 0  # Currently selected app
 
@@ -173,6 +217,13 @@ class MainMenuScreen:
         """Move to next app in menu"""
         self.current_index = (self.current_index + 1) % len(self.apps)
         self.logger.info(f"Main menu: selected {self.apps[self.current_index]['name']}")
+
+    def prev_app(self):
+        """Move to previous app in menu"""
+        self.current_index = (self.current_index - 1) % len(self.apps)
+        self.logger.info(
+            f"Main menu: selected {self.apps[self.current_index]['name']}"
+        )
 
     def get_selected_app(self):
         """Get currently selected app"""
@@ -399,10 +450,14 @@ class LibraryScreen:
         try:
             self.font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
             self.title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+            self.footer_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18
+            )
         except Exception:
             self.logger.warning("TrueType fonts not found, using default")
             self.font = ImageFont.load_default()
             self.title_font = ImageFont.load_default()
+            self.footer_font = ImageFont.load_default()
         # Initialize cover extractor
         from src.utils.cover_extractor import CoverExtractor
         self.cover_extractor = CoverExtractor()
@@ -428,24 +483,35 @@ class LibraryScreen:
 
         for filename in os.listdir(books_dir):
             if filename.lower().endswith('.epub'):
-                # Remove .epub extension and replace underscores with spaces
-                title = filename[:-5].replace('_', ' ')
+                filepath = os.path.join(books_dir, filename)
+                fallback_title = filename[:-5].replace('_', ' ')
+                title = get_epub_title(
+                    filepath,
+                    fallback=fallback_title,
+                )
                 self.books.append({
                     'filename': filename,
-                    'path': os.path.join(books_dir, filename),
+                    'path': filepath,
                     'title': title
                 })
 
         self.books.sort(key=lambda x: x['title'].lower())
 
-        # Add Home icon at the end of the list
-        self.books.append({
-            'filename': '__home__',
-            'path': '__home__',
-            'title': '🏠 Home'
-        })
+        # Home foi removido da lista: o botão físico Back regressa
+        # ao Menu Principal.
+        if self.books:
+            self.current_index = min(
+                self.current_index,
+                len(self.books) - 1,
+            )
+            self.current_page = (
+                self.current_index // self.items_per_page
+            )
+        else:
+            self.current_index = 0
+            self.current_page = 0
 
-        self.logger.info(f"Loaded {len(self.books) - 1} books")
+        self.logger.info(f"Loaded {len(self.books)} books")
     
     def _get_cached_wifi_status(self) -> bool:
         """Get WiFi status with caching to avoid expensive subprocess calls"""
@@ -703,24 +769,24 @@ class LibraryScreen:
             # Draw wrapped lines
             for line in lines:
                 draw.text((text_x, text_y), line, font=self.font, fill=0)
-                text_y += 22  # Line spacing
+                text_y += max(22, self.font_size + 2)  # Title line spacing
             
             y += line_height
 
         # Draw footer with page info
         if len(self.books) > 0:
             footer_text = f"Book {self.current_index + 1} of {len(self.books)}"
-            draw.text((40, self.height - 40), footer_text, font=self.font, fill=0)
+            draw.text((40, self.height - 40), footer_text, font=self.footer_font, fill=0)
 
         # Draw sleep status in bottom-right corner
         sleep_text = "Sleep: ON" if self.sleep_enabled else "Sleep: OFF"
         try:
-            bbox = draw.textbbox((0, 0), sleep_text, font=self.font)
+            bbox = draw.textbbox((0, 0), sleep_text, font=self.footer_font)
             sleep_width = bbox[2] - bbox[0]
             sleep_x = self.width - sleep_width - 40
         except:
             sleep_x = self.width - 140
-        draw.text((sleep_x, self.height - 40), sleep_text, font=self.font, fill=0)
+        draw.text((sleep_x, self.height - 40), sleep_text, font=self.footer_font, fill=0)
 
         return image
 
@@ -731,7 +797,7 @@ class ReaderScreen:
     Uses EPUBRenderer (PyMuPDF) to display pages
     """
 
-    def __init__(self, width: int = 800, height: int = 480, zoom_factor: float = 1.0, dpi: int = 150, cache_size: int = 5, show_page_numbers: bool = True, battery_monitor=None):
+    def __init__(self, width: int = 800, height: int = 480, zoom_factor: float = 1.0, cache_size: int = 5, show_page_numbers: bool = True, battery_monitor=None):
         """
         Initialize reader screen
 
@@ -739,7 +805,6 @@ class ReaderScreen:
             width: Screen width
             height: Screen height
             zoom_factor: Zoom multiplier for content
-            dpi: Rendering DPI for quality
             cache_size: Number of pages to cache
             show_page_numbers: Whether to show page numbers
             battery_monitor: Optional BatteryMonitor instance
@@ -748,10 +813,14 @@ class ReaderScreen:
         self.width = width
         self.height = height
         self.zoom_factor = zoom_factor
-        self.dpi = dpi
         self.show_page_numbers = show_page_numbers
 
         self.current_page = 0
+        self.completion_mode = False
+        self.completion_details = None
+        self.completion_menu_index = 0
+        self.completion_rating_editing = False
+        self.completion_rating_value = 0
         self.renderer = None
         self.page_cache = None
         self.epub_path = None
@@ -764,14 +833,18 @@ class ReaderScreen:
         self.PageCache = PageCache
         self.cache_size = cache_size
 
-    def load_epub(self, epub_path: str, zoom_factor: float = None, dpi: int = None, progress_callback = None):
+        # Serialize Pillow/FreeType rendering between foreground and prefetch.
+        self._page_render_lock = threading.RLock()
+        self._prefetch_generation = 0
+        self._prefetch_target = None
+
+    def load_epub(self, epub_path: str, zoom_factor: float = None, progress_callback = None):
         """
         Load an EPUB file
 
         Args:
             epub_path: Path to EPUB file
             zoom_factor: Optional zoom override (uses self.zoom_factor if not provided)
-            dpi: Optional DPI override (uses self.dpi if not provided)
             progress_callback: Optional callback fn(percent, message) for loading updates
         """
         try:
@@ -782,8 +855,6 @@ class ReaderScreen:
             # Use provided settings or defaults
             if zoom_factor is not None:
                 self.zoom_factor = zoom_factor
-            if dpi is not None:
-                self.dpi = dpi
 
             # Initialize PillowTextRenderer
             from src.reader.pillow_text_renderer import PillowTextRenderer
@@ -792,7 +863,6 @@ class ReaderScreen:
                 width=self.width,
                 height=self.height,
                 zoom_factor=self.zoom_factor,
-                dpi=self.dpi,
                 progress_callback=progress_callback
             )
             self.renderer_type = 'pillow'
@@ -803,13 +873,18 @@ class ReaderScreen:
 
             self.page_cache = self.PageCache(self.cache_size)
             self.current_page = 0
+            self.completion_mode = False
+            self.completion_details = None
+            self.completion_menu_index = 0
+            self.completion_rating_editing = False
+            self.completion_rating_value = 0
+            self._prefetch_generation += 1
+            self._prefetch_target = None
 
-            # Pre-fill cache for first few pages
-            if self.page_cache:
-                self.page_cache.reset()
-                self._update_cache(0)  # Cache surrounding pages
+            # Do not render page 0 before saved progress is restored.
+            self.page_cache.reset_stats()
 
-            self.logger.info(f"Loaded EPUB: {epub_path} ({self.renderer.get_page_count()} pages, renderer={self.renderer_type}, zoom={self.zoom_factor}, dpi={self.dpi})")
+            self.logger.info(f"Loaded EPUB: {epub_path} ({self.renderer.get_page_count()} pages, renderer={self.renderer_type}, zoom={self.zoom_factor})")
 
         except Exception as e:
             self.logger.error(f"Failed to load EPUB: {e}")
@@ -826,6 +901,7 @@ class ReaderScreen:
             return False
 
         if self.current_page < self.renderer.get_page_count() - 1:
+            self._prefetch_target = None
             self.current_page += 1
             self.logger.debug(f"Next page: {self.current_page}")
             return True
@@ -844,8 +920,9 @@ class ReaderScreen:
             return False
 
         if self.current_page > 0:
+            self._prefetch_target = None
             self.current_page -= 1
-            self.logger.debug(f"Previous page: {self.current_page + 1}/{self.renderer.get_total_pages()}")
+            self.logger.debug(f"Previous page: {self.current_page + 1}/{self.renderer.get_page_count()}")
             return True
         return False
 
@@ -861,6 +938,7 @@ class ReaderScreen:
 
         total_pages = self.renderer.get_page_count()
         if 0 <= page_number < total_pages:
+            self._prefetch_target = None
             self.current_page = page_number
             self.logger.info(f"Jumped to page {page_number + 1}/{total_pages}")
 
@@ -876,10 +954,157 @@ class ReaderScreen:
 
         total_pages = self.renderer.get_page_count()
         if 0 <= page_number < total_pages:
-            # Render and cache the page
-            img = self.renderer.render_page(page_number, show_page_number=self.show_page_numbers)
-            self.page_cache.put(page_number, img)
-            self.logger.debug(f"Cached page {page_number + 1}/{total_pages}")
+            with self._page_render_lock:
+                if (
+                    not self.renderer
+                    or self.page_cache is None
+                ):
+                    return
+
+                # Render and cache the page
+                img = self.renderer.render_page(
+                    page_number,
+                    show_page_number=self.show_page_numbers,
+                )
+                self.page_cache.put(page_number, img)
+
+            self.logger.debug(
+                f"Cached page {page_number + 1}/{total_pages}"
+            )
+
+    def prefetch_around_async(self, radius: int):
+        """Pre-render nearby pages in RAM without delaying the visible refresh."""
+        try:
+            radius = int(radius)
+        except (TypeError, ValueError):
+            radius = 0
+
+        radius = max(0, min(20, radius))
+
+        with self._page_render_lock:
+            if not self.renderer or self.page_cache is None:
+                return
+
+            center_page = self.current_page
+            total_pages = self.renderer.get_page_count()
+
+            window_start = max(0, center_page - radius)
+            window_end = min(total_pages - 1, center_page + radius)
+            wanted_pages = set(range(window_start, window_end + 1))
+
+            # Reserve the cache for exactly the active Reader window.
+            # Stale pages outside it must not evict pages we still need.
+            self.page_cache.resize(max(1, len(wanted_pages)))
+            self.page_cache.retain_only(wanted_pages)
+
+            if radius == 0:
+                self._prefetch_target = None
+                return
+
+            generation = self._prefetch_generation
+            book_path = self.current_book_path
+            target = (generation, center_page, radius)
+
+            if self._prefetch_target == target:
+                return
+
+            # Changing this token cancels any older worker at its next page.
+            self._prefetch_target = target
+
+            page_numbers = []
+            for distance in range(1, radius + 1):
+                forward = center_page + distance
+                backward = center_page - distance
+
+                # Prefer the next page first, then the previous page.
+                if forward < total_pages:
+                    page_numbers.append(forward)
+                if backward >= 0:
+                    page_numbers.append(backward)
+
+            if not any(
+                not self.page_cache.contains(page_number)
+                for page_number in page_numbers
+            ):
+                self._prefetch_target = None
+                return
+
+        def worker():
+            import time as _time
+
+            started = _time.perf_counter()
+            rendered = 0
+            cancelled = False
+
+            try:
+                for page_number in page_numbers:
+                    # One page per lock acquisition. Foreground navigation
+                    # therefore never waits for an entire prefetch window.
+                    with self._page_render_lock:
+                        if (
+                            self._prefetch_target != target
+                            or generation != self._prefetch_generation
+                            or book_path != self.current_book_path
+                            or not self.renderer
+                            or self.page_cache is None
+                        ):
+                            cancelled = True
+                            break
+
+                        if self.page_cache.contains(page_number):
+                            continue
+
+                        image = self.renderer.render_page(
+                            page_number,
+                            show_page_number=self.show_page_numbers,
+                        )
+
+                        if (
+                            self._prefetch_target != target
+                            or generation != self._prefetch_generation
+                            or book_path != self.current_book_path
+                            or self.page_cache is None
+                        ):
+                            cancelled = True
+                            break
+
+                        self.page_cache.put(page_number, image)
+                        rendered += 1
+
+                    # Yield between pages so foreground work gets priority.
+                    _time.sleep(0.01)
+
+            except Exception:
+                self.logger.exception(
+                    "Reader adaptive prefetch failed around page %d",
+                    center_page + 1,
+                )
+
+            finally:
+                elapsed = _time.perf_counter() - started
+
+                with self._page_render_lock:
+                    if self._prefetch_target == target:
+                        self._prefetch_target = None
+
+                if rendered:
+                    self.logger.info(
+                        "Adaptive prefetch %s around page %d/%d: "
+                        "radius=%d rendered=%d cache=%d in %.3f s",
+                        "cancelled" if cancelled else "ready",
+                        center_page + 1,
+                        total_pages,
+                        radius,
+                        rendered,
+                        len(self.page_cache) if self.page_cache is not None else 0,
+                        elapsed,
+                    )
+
+        threading.Thread(
+            target=worker,
+            name="pibook-reader-prefetch",
+            daemon=True,
+        ).start()
 
     def show_loading_progress(self, percentage: int, message: str = "Loading..."):
         """
@@ -1038,6 +1263,321 @@ class ReaderScreen:
         text_x = battery_x - text_width - 5
         draw.text((text_x, y), percentage_text, font=font, fill=0)
 
+    def _render_completion_page(self) -> Image.Image:
+        """Render the PiBook-generated end-of-book page."""
+        img = Image.new('1', (self.width, self.height), 1)
+        draw = ImageDraw.Draw(img)
+
+        try:
+            title_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                34,
+            )
+            book_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                24,
+            )
+            text_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                18,
+            )
+        except Exception:
+            title_font = ImageFont.load_default()
+            book_font = ImageFont.load_default()
+            text_font = ImageFont.load_default()
+
+        book_title = (
+            get_epub_title(self.current_book_path)
+            if self.current_book_path
+            else "Livro"
+        )
+
+        def centered(text, y, font):
+            bbox = draw.textbbox((0, 0), text, font=font)
+            width = bbox[2] - bbox[0]
+            draw.text(
+                ((self.width - width) // 2, y),
+                text,
+                font=font,
+                fill=0,
+            )
+
+        centered("Fim do livro", 95, title_font)
+
+        draw.line(
+            (55, 155, self.width - 55, 155),
+            fill=0,
+            width=2,
+        )
+
+        # Wrap the book title to fit the screen.
+        words = str(book_title).split()
+        lines = []
+        line = ""
+
+        for word in words:
+            candidate = f"{line} {word}".strip()
+            bbox = draw.textbbox((0, 0), candidate, font=book_font)
+
+            if bbox[2] - bbox[0] <= self.width - 70:
+                line = candidate
+            else:
+                if line:
+                    lines.append(line)
+                line = word
+
+        if line:
+            lines.append(line)
+
+        y = 205
+        for line in lines[:3]:
+            centered(line, y, book_font)
+            y += 34
+
+        centered("Leitura concluída", y + 55, text_font)
+
+        details = self.completion_details or {}
+        history = details.get("reading_history") or []
+        last_read = history[-1] if history else {}
+
+        def format_date(value):
+            if not value:
+                return "Desconhecido"
+            try:
+                from datetime import datetime
+                return datetime.fromisoformat(value).strftime("%d/%m/%Y")
+            except Exception:
+                return "Desconhecido"
+
+        def format_duration(value):
+            if value is None:
+                return "Desconhecido"
+
+            try:
+                seconds = max(0, int(round(float(value))))
+            except (TypeError, ValueError):
+                return "Desconhecido"
+
+            hours, remainder = divmod(seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+
+            if hours:
+                return f"{hours} h {minutes} min"
+            if minutes:
+                return f"{minutes} min"
+            return f"{seconds} s"
+
+        started = format_date(last_read.get("started_at"))
+        finished = format_date(last_read.get("finished_at"))
+        duration = format_duration(last_read.get("reading_seconds"))
+
+        times_finished = int(
+            details.get("times_finished", 0) or 0
+        )
+
+        rating = details.get("rating")
+
+        rows = [
+            f"Início: {started}",
+            f"Fim: {finished}",
+            f"Tempo efetivo: {duration}",
+            f"Leituras concluídas: {times_finished}",
+        ]
+
+        # Keep the reading information lower and give each line more room.
+        row_y = max(y + 120, 370)
+        for row in rows:
+            centered(row, row_y, text_font)
+            row_y += 46
+
+        def get_rating_value():
+            if self.completion_rating_editing:
+                return max(
+                    0,
+                    min(10, int(self.completion_rating_value)),
+                )
+
+            try:
+                value = int(rating)
+            except (TypeError, ValueError):
+                return None
+
+            return max(0, min(10, value))
+
+        def draw_star(x, y, state):
+            """Draw one 5-point star: empty, half or full."""
+            import math
+
+            size = 24
+            cx = size / 2
+            cy = size / 2
+            outer = 10
+            inner = 4.4
+
+            points = []
+            for i in range(10):
+                angle = -math.pi / 2 + i * math.pi / 5
+                radius = outer if i % 2 == 0 else inner
+                points.append(
+                    (
+                        int(round(cx + math.cos(angle) * radius)),
+                        int(round(cy + math.sin(angle) * radius)),
+                    )
+                )
+
+            star = Image.new('1', (size, size), 1)
+            star_draw = ImageDraw.Draw(star)
+
+            if state == "full":
+                star_draw.polygon(points, fill=0)
+            elif state == "half":
+                star_draw.polygon(points, fill=0)
+                star_draw.rectangle(
+                    (size // 2, 0, size, size),
+                    fill=1,
+                )
+                star_draw.polygon(points, outline=0)
+            else:
+                star_draw.polygon(points, outline=0)
+
+            img.paste(star, (x, y))
+
+        def draw_rating_item(top, selected):
+            value = get_rating_value()
+
+            label = "Avaliação"
+            label_bbox = draw.textbbox(
+                (0, 0),
+                label,
+                font=text_font,
+            )
+            label_width = label_bbox[2] - label_bbox[0]
+
+            star_size = 24
+            star_gap = 3
+            stars_width = 5 * star_size + 4 * star_gap
+
+            if self.completion_rating_editing:
+                value_text = f"< {value}/10 >"
+            elif value is None:
+                value_text = "—"
+            else:
+                value_text = f"{value}/10"
+
+            value_bbox = draw.textbbox(
+                (0, 0),
+                value_text,
+                font=text_font,
+            )
+            value_width = value_bbox[2] - value_bbox[0]
+
+            gap1 = 12
+            gap2 = 10
+            total_width = (
+                label_width
+                + gap1
+                + stars_width
+                + gap2
+                + value_width
+            )
+
+            x = (self.width - total_width) // 2
+
+            text_y = (
+                top
+                + (item_height - (label_bbox[3] - label_bbox[1])) // 2
+                - label_bbox[1]
+            )
+
+            draw.text(
+                (x, text_y),
+                label,
+                font=text_font,
+                fill=0,
+            )
+
+            stars_x = x + label_width + gap1
+            stars_y = top + (item_height - star_size) // 2
+
+            units = value if value is not None else 0
+
+            for i in range(5):
+                threshold = i * 2
+
+                if units >= threshold + 2:
+                    state = "full"
+                elif units == threshold + 1:
+                    state = "half"
+                else:
+                    state = "empty"
+
+                draw_star(
+                    stars_x + i * (star_size + star_gap),
+                    stars_y,
+                    state,
+                )
+
+            value_x = stars_x + stars_width + gap2
+            value_y = (
+                top
+                + (item_height - (value_bbox[3] - value_bbox[1])) // 2
+                - value_bbox[1]
+            )
+
+            draw.text(
+                (value_x, value_y),
+                value_text,
+                font=text_font,
+                fill=0,
+            )
+
+        menu_items = [
+            "Avaliação",
+            "Reler",
+            "Biblioteca",
+        ]
+
+        menu_y = max(595, row_y + 20)
+        item_height = 44
+        item_gap = 8
+
+        for index, label in enumerate(menu_items):
+            selected = index == self.completion_menu_index
+            top = menu_y + index * (item_height + item_gap)
+            bottom = top + item_height
+
+            if selected:
+                draw.rounded_rectangle(
+                    (55, top, self.width - 55, bottom),
+                    radius=10,
+                    outline=0,
+                    width=2,
+                )
+
+            if index == 0:
+                draw_rating_item(top, selected)
+                continue
+
+            bbox = draw.textbbox(
+                (0, 0),
+                label,
+                font=text_font,
+            )
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+
+            draw.text(
+                (
+                    (self.width - text_width) // 2,
+                    top + (item_height - text_height) // 2 - bbox[1],
+                ),
+                label,
+                font=text_font,
+                fill=0,
+            )
+
+        return img
+
     def get_current_image(self) -> Image.Image:
         """
         Get current page as PIL Image (with caching)
@@ -1049,24 +1589,58 @@ class ReaderScreen:
             # Return blank page if no book loaded
             return Image.new('1', (self.width, self.height), 1)
 
-        # Check cache first
-        cached = self.page_cache.get(self.current_page)
-        if cached:
-            return cached
+        if self.completion_mode:
+            img = self._render_completion_page()
 
-        # Render and cache
-        img = self.renderer.render_page(self.current_page, show_page_number=self.show_page_numbers)
-        self.page_cache.put(self.current_page, img)
+            if self.battery_monitor:
+                draw = ImageDraw.Draw(img)
+                self._draw_battery_icon(
+                    draw,
+                    self.width - 10,
+                    5,
+                    self.battery_monitor.get_percentage(),
+                    self.battery_monitor.is_charging(),
+                )
 
-        # Add battery overlay if monitor available
-        if self.battery_monitor:
-            # Create a copy to avoid modifying cached image
-            img = img.copy()
-            draw = ImageDraw.Draw(img)
-            battery_percentage = self.battery_monitor.get_percentage()
-            is_charging = self.battery_monitor.is_charging()
-            self._draw_battery_icon(draw, self.width - 10, 5, battery_percentage, is_charging)
+            return img
 
+        # Cache only immutable book content. Dynamic overlays are applied
+        # afterwards on every render, including cache hits.
+        with self._page_render_lock:
+            if not self.renderer or self.page_cache is None:
+                return Image.new('1', (self.width, self.height), 1)
+
+            base_img = self.page_cache.get(self.current_page)
+            if base_img is None:
+                import time as _time
+                render_started = _time.perf_counter()
+                base_img = self.renderer.render_page(
+                    self.current_page,
+                    show_page_number=self.show_page_numbers,
+                )
+                render_elapsed = _time.perf_counter() - render_started
+                self.page_cache.put(self.current_page, base_img)
+                self.logger.info(
+                    "Rendered page %d/%d in %.3f s (cache miss)",
+                    self.current_page + 1,
+                    self.renderer.get_page_count(),
+                    render_elapsed,
+                )
+
+        if not self.battery_monitor:
+            return base_img
+
+        img = base_img.copy()
+        draw = ImageDraw.Draw(img)
+        battery_percentage = self.battery_monitor.get_percentage()
+        is_charging = self.battery_monitor.is_charging()
+        self._draw_battery_icon(
+            draw,
+            self.width - 10,
+            5,
+            battery_percentage,
+            is_charging,
+        )
         return img
 
     def get_page_info(self) -> Dict[str, any]:
@@ -1087,13 +1661,17 @@ class ReaderScreen:
 
     def close(self):
         """Close current book and clean up"""
-        if self.renderer:
-            self.renderer.close()
-            self.renderer = None
+        with self._page_render_lock:
+            self._prefetch_generation += 1
+            self._prefetch_target = None
 
-        if self.page_cache:
-            self.page_cache.clear()
-            self.page_cache = None
+            if self.renderer:
+                self.renderer.close()
+                self.renderer = None
+
+            if self.page_cache is not None:
+                self.page_cache.clear()
+                self.page_cache = None
 
         self.logger.info("Reader closed")
 

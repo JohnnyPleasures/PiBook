@@ -1,0 +1,7 @@
+{
+  "default_mode": "hotspot",
+  "fallback_wifi_uuid": "REPLACE_WITH_NETWORKMANAGER_UUID",
+  "fallback_wifi_name": "REPLACE_WITH_NETWORKMANAGER_NAME",
+  "platform_timeout_seconds": 120,
+  "hotspot_attempts": 2
+}

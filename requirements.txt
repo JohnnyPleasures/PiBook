@@ -1,10 +1,24 @@
-Pillow>=10.0.0
-gpiozero>=2.0
-spidev>=3.6
-PyYAML>=6.0
-Flask>=3.0.0
-EbookLib>=0.18
-beautifulsoup4>=4.12.0
-cairosvg>=2.7.0
-adafruit-circuitpython-ads1x15>=2.2.0
-evdev>=1.6.0
+# PiBook Python dependency reference
+#
+# IMPORTANT:
+# The supported Raspberry Pi Zero W installation does NOT install this file
+# with pip. Use:
+#
+#   sudo ./scripts/install/install.sh
+#
+# The installer uses Debian/Raspberry Pi OS packages and creates the virtual
+# environment with --system-site-packages. This avoids unnecessary compilation
+# and binary-wheel problems on ARMv6.
+#
+# These names document the Python-level runtime dependencies.
+
+Pillow
+gpiozero
+spidev
+PyYAML
+Flask
+EbookLib
+beautifulsoup4
+cairosvg
+evdev
+smbus2

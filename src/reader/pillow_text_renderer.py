@@ -12,14 +12,16 @@ import os
 import re
 from io import BytesIO
 from typing import List, NamedTuple, Union
-from bs4 import BeautifulSoup, NavigableString, Tag
+# BeautifulSoup is imported lazily only when layout parsing is required.
+from src.reader.epub_repair import read_epub_tolerant
+from src.reader.layout_cache import (
+    cache_path as layout_cache_path,
+    layout_signature,
+)
 
 # Optional: SVG support (requires cairosvg)
-try:
-    import cairosvg
-    SVG_SUPPORT = True
-except ImportError:
-    SVG_SUPPORT = False
+# CairoSVG is imported lazily only when an actual SVG image is found.
+# This avoids loading Cairo/CFFI for normal raster-only EPUBs.
 
 # Define a token structure for rich text
 class TextToken(NamedTuple):
@@ -41,12 +43,107 @@ class TableToken(NamedTuple):
     max_width: int  # Maximum width for table
     new_paragraph: bool = True
 
+class LazyPageStore:
+    """Thread-safe read-only page store backed by SQLite."""
+
+    def __init__(self, cache_path: str):
+        import sqlite3
+        import threading
+
+        self.cache_path = cache_path
+        self._lock = threading.RLock()
+
+        # Read metadata with a short-lived connection. Do not keep a SQLite
+        # connection tied to the thread that happened to open the book.
+        with sqlite3.connect(cache_path) as conn:
+            meta = dict(
+                conn.execute(
+                    "SELECT key, value FROM meta"
+                ).fetchall()
+            )
+
+        self.layout_signature = meta.get(
+            "layout_signature",
+            "",
+        )
+        self.page_count = int(
+            meta.get("page_count", "0")
+        )
+
+        # Small RAM cache for repeated/adjacent pages.
+        self._page_cache = {}
+        self._page_cache_order = []
+        self._page_cache_limit = 4
+
+    def __len__(self):
+        return self.page_count
+
+    def __getitem__(self, page_num):
+        import pickle
+        import sqlite3
+
+        if isinstance(page_num, slice):
+            start, stop, step = page_num.indices(
+                self.page_count
+            )
+            return [
+                self[i]
+                for i in range(start, stop, step)
+            ]
+
+        if page_num < 0:
+            page_num += self.page_count
+
+        if not 0 <= page_num < self.page_count:
+            raise IndexError("page index out of range")
+
+        # Rendering can be requested by GPIO, web control and background
+        # battery-refresh threads. Keep both the RAM cache and SQLite access
+        # thread-safe.
+        with self._lock:
+            cached = self._page_cache.get(page_num)
+            if cached is not None:
+                return cached
+
+            # Short-lived connection: SQLite objects never cross threads.
+            with sqlite3.connect(self.cache_path) as conn:
+                row = conn.execute(
+                    "SELECT data FROM pages WHERE page_num = ?",
+                    (page_num,),
+                ).fetchone()
+
+            if row is None:
+                raise IndexError(
+                    f"page {page_num} missing from cache"
+                )
+
+            page = pickle.loads(row[0])
+
+            self._page_cache[page_num] = page
+            self._page_cache_order.append(page_num)
+
+            while (
+                len(self._page_cache_order)
+                > self._page_cache_limit
+            ):
+                old = self._page_cache_order.pop(0)
+                self._page_cache.pop(old, None)
+
+            return page
+
+    def close(self):
+        # There is no persistent SQLite connection to close.
+        with self._lock:
+            self._page_cache.clear()
+            self._page_cache_order.clear()
+
+
 class PillowTextRenderer:
     """
     EPUB renderer using direct Pillow text drawing with Rich Text support.
     """
 
-    def __init__(self, epub_path: str, width: int = 800, height: int = 480, zoom_factor: float = 1.0, dpi: int = 150, progress_callback = None):
+    def __init__(self, epub_path: str, width: int = 800, height: int = 480, zoom_factor: float = 1.0, progress_callback = None):
         self.logger = logging.getLogger(__name__)
         self.epub_path = epub_path
         self.width = width
@@ -148,56 +245,205 @@ class PillowTextRenderer:
         self.fonts['h2'] = load_font('bold', int(self.header_font_size * 0.9))
 
     def _get_cache_path(self) -> str:
-        """Get path to cache file"""
-        return self.epub_path + f".{self.width}x{self.height}.{self.zoom_factor}.cache"
+        """Get path to the cache for this exact renderer layout."""
+        return str(
+            layout_cache_path(
+                self.epub_path,
+                self.width,
+                self.height,
+                self.zoom_factor,
+            )
+        )
 
     def _load_cache(self) -> bool:
-        """Try to load layout from cache"""
-        import pickle
+        """Try to load a paginated SQLite layout cache lazily."""
         cache_path = self._get_cache_path()
-        if os.path.exists(cache_path):
-            try:
-                # Check timestamp
-                if os.path.getmtime(cache_path) < os.path.getmtime(self.epub_path):
-                    return False
-                
-                with open(cache_path, 'rb') as f:
-                    data = pickle.load(f)
-                    self.pages = data['pages']
-                    self.page_count = data['page_count']
-                self.logger.info(f"Loaded layout from cache: {cache_path}")
-                return True
-            except Exception as e:
-                self.logger.warning(f"Failed to load cache: {e}")
+
+        if not os.path.exists(cache_path):
+            return False
+
+        try:
+            # A cache older than the source EPUB is stale.
+            if (
+                os.path.getmtime(cache_path)
+                < os.path.getmtime(self.epub_path)
+            ):
+                return False
+
+            pages = LazyPageStore(cache_path)
+
+            expected_signature = layout_signature(
+                self.width,
+                self.height,
+                self.zoom_factor,
+            )
+
+            if pages.layout_signature != expected_signature:
+                pages.close()
+                self.logger.info(
+                    "Ignoring incompatible layout cache: %s",
+                    cache_path,
+                )
+                return False
+
+            self.pages = pages
+            self.page_count = pages.page_count
+
+            self.logger.info(
+                "Loaded lazy layout cache: %s",
+                cache_path,
+            )
+            return True
+
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to load lazy cache: {e}"
+            )
+
         return False
 
     def _save_cache(self):
-        """Save layout to cache"""
+        """Save layout as a paginated SQLite cache."""
         import pickle
+        import sqlite3
+        import tempfile
+
+        cache_path = self._get_cache_path()
+
+        # Each renderer gets a private temporary SQLite file. This keeps
+        # concurrent cold-open/background preparation safe: only a fully
+        # written database is published through the final atomic os.replace().
+        temp_dir = os.path.dirname(cache_path) or "."
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_handle = tempfile.NamedTemporaryFile(
+            prefix=os.path.basename(cache_path) + ".",
+            suffix=".tmp",
+            dir=temp_dir,
+            delete=False,
+        )
+        temp_path = temp_handle.name
+        temp_handle.close()
+
         try:
-            cache_path = self._get_cache_path()
-            with open(cache_path, 'wb') as f:
-                pickle.dump({
-                    'pages': self.pages,
-                    'page_count': self.page_count
-                }, f)
-            self.logger.info(f"Saved layout to cache: {cache_path}")
+            conn = sqlite3.connect(temp_path)
+
+            try:
+                # The database is disposable/rebuildable and only becomes
+                # visible after an atomic os.replace(), so journaling during
+                # construction would only add unnecessary work.
+                conn.execute("PRAGMA journal_mode=OFF")
+                conn.execute("PRAGMA synchronous=OFF")
+
+                conn.execute(
+                    "CREATE TABLE meta ("
+                    "key TEXT PRIMARY KEY, "
+                    "value TEXT NOT NULL"
+                    ")"
+                )
+                conn.execute(
+                    "CREATE TABLE pages ("
+                    "page_num INTEGER PRIMARY KEY, "
+                    "data BLOB NOT NULL"
+                    ")"
+                )
+
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?)",
+                    (
+                        "layout_signature",
+                        layout_signature(
+                            self.width,
+                            self.height,
+                            self.zoom_factor,
+                        ),
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?)",
+                    (
+                        "page_count",
+                        str(self.page_count),
+                    ),
+                )
+
+                for page_num, page in enumerate(self.pages):
+                    blob = pickle.dumps(
+                        page,
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    )
+                    conn.execute(
+                        "INSERT INTO pages(page_num, data) "
+                        "VALUES (?, ?)",
+                        (
+                            page_num,
+                            sqlite3.Binary(blob),
+                        ),
+                    )
+
+                conn.commit()
+
+            finally:
+                conn.close()
+
+            os.replace(temp_path, cache_path)
+
+            self.logger.info(
+                "Saved lazy layout cache: %s",
+                cache_path,
+            )
+
         except Exception as e:
-            self.logger.warning(f"Failed to save cache: {e}")
+            self.logger.warning(
+                f"Failed to save lazy cache: {e}"
+            )
+
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
 
     def _load_epub(self):
         if self.progress_callback:
             self.progress_callback(5.0, "Opening EPUB file...")
 
-        # Try cache first
+        # Try cache first.
         if self._load_cache():
-            # Still need to load the book for images and fonts
-            self.book = epub.read_epub(self.epub_path)
-            self._extract_images()
-            self._extract_fonts()
+            # Images used by cached pages are already serialized inside the
+            # paginated layout cache, so reopening the EPUB just to extract
+            # images would waste time.
+            #
+            # TTF/OTF fonts are different: render_page() still needs the actual
+            # font objects. Detect those cheaply from the ZIP directory and
+            # only reopen the EPUB when a loadable embedded font is present.
+            from zipfile import ZipFile
+
+            has_embedded_fonts = False
+
+            try:
+                with ZipFile(self.epub_path) as archive:
+                    has_embedded_fonts = any(
+                        name.lower().endswith(('.ttf', '.otf'))
+                        for name in archive.namelist()
+                    )
+            except Exception as e:
+                # Conservative fallback: if the cheap ZIP inspection fails,
+                # reopen through the tolerant EPUB reader as before.
+                self.logger.debug(
+                    f"Could not inspect EPUB fonts cheaply: {e}"
+                )
+                has_embedded_fonts = True
+
+            if has_embedded_fonts:
+                self.book = read_epub_tolerant(
+                    self.epub_path,
+                    logger=self.logger,
+                )
+                self._extract_fonts()
+
             return
 
-        self.book = epub.read_epub(self.epub_path)
+        self.book = read_epub_tolerant(self.epub_path, logger=self.logger)
 
         if self.progress_callback:
             self.progress_callback(10.0, "Extracting images and fonts...")
@@ -247,17 +493,23 @@ class PillowTextRenderer:
 
                 # Check if this is an SVG file
                 if img_name.lower().endswith('.svg'):
-                    if SVG_SUPPORT:
-                        try:
-                            # Convert SVG to PNG using cairosvg
-                            png_data = cairosvg.svg2png(bytestring=img_data, output_width=800)
-                            img = Image.open(BytesIO(png_data))
-                            self.logger.debug(f"Converted SVG to raster: {img_name}")
-                        except Exception as e:
-                            self.logger.warning(f"Failed to convert SVG {img_name}: {e}")
-                            continue
-                    else:
-                        self.logger.warning(f"SVG support not available (install cairosvg): {img_name}")
+                    try:
+                        import cairosvg
+                    except ImportError:
+                        self.logger.warning(
+                            f"SVG support not available (install cairosvg): {img_name}"
+                        )
+                        continue
+
+                    try:
+                        png_data = cairosvg.svg2png(
+                            bytestring=img_data,
+                            output_width=800,
+                        )
+                        img = Image.open(BytesIO(png_data))
+                        self.logger.debug(f"Converted SVG to raster: {img_name}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to convert SVG {img_name}: {e}")
                         continue
                 else:
                     # Regular raster image (PNG, JPG, GIF, etc.)
@@ -341,113 +593,256 @@ class PillowTextRenderer:
                 self.logger.warning(f"Failed to load custom font {font_name}: {e}")
 
     def _parse_html(self, html: str) -> List[Union[TextToken, ImageToken, TableToken]]:
-        """Parse HTML into flat list of tokens with styles"""
-        soup = BeautifulSoup(html, 'html.parser')
+        """Parse HTML into flat list of tokens with styles."""
+        # Layout parsing is only needed when the persistent layout cache misses.
+        #
+        # Use lxml directly rather than building an intermediate BeautifulSoup
+        # tree. On the large validation EPUB this produces the same compact
+        # source-token count while cutting parsing time substantially.
+        from lxml import html as lxml_html
+
         tokens = []
 
-        # Remove metadata
-        for tag in soup(['head', 'script', 'style', 'title', 'meta']):
-            tag.decompose()
+        # _parse_html currently receives decoded text from the EPUB loader.
+        # Re-encode as UTF-8 and explicitly tell lxml the encoding so XHTML
+        # declarations in the original document cannot conflict with Python's
+        # already-decoded Unicode string.
+        if isinstance(html, str):
+            html_bytes = html.encode('utf-8')
+        else:
+            html_bytes = bytes(html)
 
-        def process_node(node, current_style='normal', current_align='left'):
-            if isinstance(node, NavigableString):
-                text = str(node).replace('\n', ' ').strip()
-                if not text: return
+        parser = lxml_html.HTMLParser(
+            encoding='utf-8',
+            recover=True,
+        )
 
-                words = re.split(r'(\s+)', str(node).replace('\n', ' '))
-                for w in words:
-                    if w:
-                        tokens.append(TextToken(w, current_style, False, current_align))
+        try:
+            root = lxml_html.document_fromstring(
+                html_bytes,
+                parser=parser,
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to parse EPUB document: {e}")
+            return tokens
+
+        def tag_name(node):
+            tag = getattr(node, 'tag', '')
+            if not isinstance(tag, str):
+                return ''
+
+            if '}' in tag:
+                tag = tag.rsplit('}', 1)[-1]
+
+            return tag.lower()
+
+        # Match the previous BeautifulSoup behaviour: process the document body
+        # when present rather than metadata in <head>.
+        bodies = root.xpath('//body')
+        start_node = bodies[0] if bodies else root
+
+        def add_text(text, current_style, current_align):
+            if text is None:
                 return
 
-            if isinstance(node, Tag):
-                # Handle table tags
-                if node.name == 'table':
-                    rows = []
-                    for tr in node.find_all('tr'):
-                        cells = []
-                        for cell in tr.find_all(['td', 'th']):
-                            # Extract text from cell, preserving basic formatting
-                            cell_text = cell.get_text(separator=' ', strip=True)
-                            cells.append(cell_text)
-                        if cells:
-                            rows.append(cells)
+            # Keep each DOM text node as one compact source token. Word/space
+            # expansion happens lazily during reflow.
+            text = str(text).replace('\n', ' ')
+            if not text.strip():
+                return
 
-                    if rows:
-                        tokens.append(TableToken(rows, self.text_width))
-                        self.logger.debug(f"Added table token: {len(rows)} rows")
-                    return  # Don't process children of table tag
+            tokens.append(
+                TextToken(
+                    text,
+                    current_style,
+                    False,
+                    current_align,
+                )
+            )
 
-                # Handle image tags
-                if node.name == 'img':
-                    src = node.get('src', '')
-                    if src:
-                        # Normalize path (remove ../ and leading /)
-                        img_path = src.split('/')[-1]  # Get just the filename
+        def mark_paragraph_end():
+            if (
+                tokens
+                and isinstance(tokens[-1], TextToken)
+                and not tokens[-1].new_paragraph
+            ):
+                tokens[-1] = tokens[-1]._replace(
+                    new_paragraph=True
+                )
 
-                        # Try to find image in cache
-                        img = None
-                        for key in self.images.keys():
-                            if key.endswith(img_path) or img_path in key:
-                                img = self.images[key]
-                                break
+        def process_node(node, current_style='normal', current_align='left'):
+            name = tag_name(node)
 
-                        if img:
-                            # Add image token with max dimensions
-                            max_img_width = self.text_width
-                            max_img_height = int(self.text_height * 0.6)  # Max 60% of page height
-                            tokens.append(ImageToken(img, max_img_width, max_img_height))
-                            self.logger.debug(f"Added image token: {img_path}")
-                        else:
-                            self.logger.warning(f"Image not found in EPUB: {src}")
-                    return  # Don't process children of img tag
+            # Metadata/non-content elements were removed by BeautifulSoup in the
+            # previous implementation. Skip them directly here.
+            if name in {
+                'head',
+                'script',
+                'style',
+                'title',
+                'meta',
+            }:
+                return
 
-                style = current_style
-                align = current_align
-                is_block = node.name in ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'br', 'li']
+            # Handle table tags.
+            if name == 'table':
+                rows = []
 
-                # Check for CSS text-align in style attribute
-                node_style = node.get('style', '')
-                if 'text-align' in node_style:
-                    if 'center' in node_style:
-                        align = 'center'
-                    elif 'right' in node_style:
-                        align = 'right'
-                    elif 'left' in node_style:
-                        align = 'left'
+                for tr in node.iter():
+                    if tag_name(tr) != 'tr':
+                        continue
 
-                # Check for center tag
-                if node.name == 'center':
+                    cells = []
+
+                    for cell in tr.iter():
+                        if tag_name(cell) not in {'td', 'th'}:
+                            continue
+
+                        # Equivalent to BeautifulSoup get_text(separator=' ',
+                        # strip=True): collect non-empty text fragments and join
+                        # them with a single space.
+                        pieces = []
+
+                        for value in cell.itertext():
+                            value = str(value).strip()
+                            if value:
+                                pieces.append(value)
+
+                        cells.append(' '.join(pieces))
+
+                    if cells:
+                        rows.append(cells)
+
+                if rows:
+                    tokens.append(
+                        TableToken(
+                            rows,
+                            self.text_width,
+                        )
+                    )
+                    self.logger.debug(
+                        f"Added table token: {len(rows)} rows"
+                    )
+
+                return
+
+            # Handle image tags.
+            if name == 'img':
+                src = node.get('src', '')
+
+                if src:
+                    img_path = src.split('/')[-1]
+                    img = None
+
+                    for key in self.images.keys():
+                        if (
+                            key.endswith(img_path)
+                            or img_path in key
+                        ):
+                            img = self.images[key]
+                            break
+
+                    if img is not None:
+                        max_img_width = self.text_width
+                        max_img_height = int(
+                            self.text_height * 0.6
+                        )
+
+                        tokens.append(
+                            ImageToken(
+                                img,
+                                max_img_width,
+                                max_img_height,
+                            )
+                        )
+                        self.logger.debug(
+                            f"Added image token: {img_path}"
+                        )
+                    else:
+                        self.logger.warning(
+                            f"Image not found in EPUB: {src}"
+                        )
+
+                return
+
+            style = current_style
+            align = current_align
+
+            is_block = name in {
+                'p',
+                'div',
+                'h1',
+                'h2',
+                'h3',
+                'h4',
+                'br',
+                'li',
+            }
+
+            # Check for CSS text-align in style attribute.
+            node_style = node.get('style', '') or ''
+
+            if 'text-align' in node_style:
+                if 'center' in node_style:
                     align = 'center'
+                elif 'right' in node_style:
+                    align = 'right'
+                elif 'left' in node_style:
+                    align = 'left'
 
-                # Determine style
-                if node.name in ['b', 'strong']:
-                    style = 'bold_italic' if 'italic' in style else 'bold'
-                elif node.name in ['i', 'em']:
-                    style = 'bold_italic' if 'bold' in style else 'italic'
-                elif node.name == 'h1':
-                    style = 'h1'
-                    align = 'center'  # Headers are typically centered
-                elif node.name == 'h2':
-                    style = 'h2'
-                    align = 'center'  # Headers are typically centered
-                elif node.name in ['h3', 'h4']:
-                    style = 'bold'
+            if name == 'center':
+                align = 'center'
 
-                if is_block and tokens and not tokens[-1].new_paragraph:
-                    # Mark last token to end paragraph
-                    if isinstance(tokens[-1], TextToken):
-                        tokens[-1] = tokens[-1]._replace(new_paragraph=True)
+            # Determine style.
+            if name in {'b', 'strong'}:
+                style = (
+                    'bold_italic'
+                    if 'italic' in style
+                    else 'bold'
+                )
+            elif name in {'i', 'em'}:
+                style = (
+                    'bold_italic'
+                    if 'bold' in style
+                    else 'italic'
+                )
+            elif name == 'h1':
+                style = 'h1'
+                align = 'center'
+            elif name == 'h2':
+                style = 'h2'
+                align = 'center'
+            elif name in {'h3', 'h4'}:
+                style = 'bold'
 
-                for child in node.children:
-                    process_node(child, style, align)
+            if is_block:
+                mark_paragraph_end()
 
-                if is_block and tokens and not tokens[-1].new_paragraph:
-                    # Mark last token to end paragraph
-                    if isinstance(tokens[-1], TextToken):
-                        tokens[-1] = tokens[-1]._replace(new_paragraph=True)
+            # lxml stores the first text fragment in node.text and subsequent
+            # sibling text in child.tail. Processing both recreates DOM order
+            # without allocating BeautifulSoup wrapper objects.
+            add_text(
+                node.text,
+                style,
+                align,
+            )
 
-        process_node(soup.body if soup.body else soup)
+            for child in node:
+                process_node(
+                    child,
+                    style,
+                    align,
+                )
+                add_text(
+                    child.tail,
+                    style,
+                    align,
+                )
+
+            if is_block:
+                mark_paragraph_end()
+
+        process_node(start_node)
         return tokens
 
     def _reflow_pages(self, tokens: List[TextToken]):
@@ -458,11 +853,42 @@ class PillowTextRenderer:
         current_y = self.margin_top
         current_x = self.margin_left + self.paragraph_indent # Start indented
         
-        # Pre-calculate font heights to avoid per-word overhead
+        # Pre-calculate font heights to avoid per-word overhead.
         font_metrics = {}
         for style, font in self.fonts.items():
             bbox = font.getbbox("Ay")
-            font_metrics[style] = bbox[3] - bbox[1] if bbox else self.base_font_size
+            font_metrics[style] = (
+                bbox[3] - bbox[1] if bbox else self.base_font_size
+            )
+
+        # A normal book repeats the same words and whitespace thousands of
+        # times. Pillow font measurement is relatively expensive on a Pi Zero,
+        # so measure each (style, text) combination only once per reflow.
+        width_cache = {}
+
+        # Hot-path helpers: roughly half of the expanded layout sequence in a
+        # normal novel consists of literal single spaces.
+        split_whitespace = re.compile(r'(\s+)').split
+        space_widths = {}
+        for style, font in self.fonts.items():
+            try:
+                space_widths[style] = font.getlength(" ")
+            except Exception:
+                space_widths[style] = self.base_font_size * 0.6
+
+        def measure_width(text, style, font):
+            key = (style, text)
+            cached = width_cache.get(key)
+            if cached is not None:
+                return cached
+
+            try:
+                value = font.getlength(text)
+            except Exception:
+                value = len(text) * self.base_font_size * 0.6
+
+            width_cache[key] = value
+            return value
 
         # Helper to finish a line
         def finish_line(line_items, y, h):
@@ -473,8 +899,73 @@ class PillowTextRenderer:
                 current_y = self.margin_top
                 y = current_y
             
+            # Compact only text fragments separated by real plain-space
+            # tokens already present in the reflow sequence. Adjacent
+            # fragments (commonly punctuation) remain separate so FreeType
+            # kerning/rasterization stays pixel-identical to the old renderer.
+            run_x = None
+            run_text = ""
+            run_style = None
+            pending_space = ""
+            pending_style = None
+
+            def flush_run():
+                nonlocal run_x, run_text, run_style
+                if run_x is not None:
+                    current_page.append(
+                        (run_x, y, run_text, run_style)
+                    )
+                run_x = None
+                run_text = ""
+                run_style = None
+
             for txt, style, x in line_items:
-                current_page.append((x, y, txt, style))
+                is_single_space = txt == " "
+                if is_single_space or txt.isspace():
+                    # Only literal spaces are safe to fold into a draw call.
+                    # Tabs/other whitespace keep the next fragment separate.
+                    if (
+                        run_x is not None
+                        and txt
+                        and (
+                            is_single_space
+                            or txt.strip(" ") == ""
+                        )
+                        and style == run_style
+                        and (
+                            pending_style is None
+                            or pending_style == style
+                        )
+                    ):
+                        pending_space += txt
+                        pending_style = style
+                    else:
+                        pending_space = ""
+                        pending_style = None
+                    continue
+
+                if run_x is None:
+                    run_x = x
+                    run_text = txt
+                    run_style = style
+
+                elif (
+                    pending_space
+                    and style == run_style
+                    and pending_style == run_style
+                ):
+                    run_text += pending_space + txt
+
+                else:
+                    flush_run()
+                    run_x = x
+                    run_text = txt
+                    run_style = style
+
+                pending_space = ""
+                pending_style = None
+
+            flush_run()
             current_y += int(h * self.line_spacing)
             return current_y
 
@@ -482,123 +973,240 @@ class PillowTextRenderer:
         current_line_max_h = 0
         
         count = 0
-        total_tokens = len(tokens)
-        for token in tokens:
-            count += 1
-            if count % 1000 == 0:
-                self.logger.debug(f"Reflow progress: {count}/{total_tokens}")
-                if self.progress_callback:
-                    # Reflow maps from 85% to 99%
-                    percent_done = 85.0 + (14.0 * (count / max(1, total_tokens)))
-                    self.progress_callback(percent_done, f"Formatting {count}/{total_tokens}...")
+        total_source_tokens = len(tokens)
+        last_progress_source = 0
 
-            # Handle table tokens
-            if isinstance(token, TableToken):
+        self.logger.info(
+            "Reflow source tokens: %d",
+            total_source_tokens,
+        )
+
+        def report_source_progress(source_index):
+            nonlocal last_progress_source
+
+            if (
+                source_index != last_progress_source
+                and source_index % 25 == 0
+            ):
+                last_progress_source = source_index
+                self.logger.debug(
+                    "Reflow progress: source %d/%d, layout tokens %d",
+                    source_index,
+                    total_source_tokens,
+                    count,
+                )
+                if self.progress_callback:
+                    percent_done = 85.0 + (
+                        14.0
+                        * (
+                            source_index
+                            / max(1, total_source_tokens)
+                        )
+                    )
+                    self.progress_callback(
+                        percent_done,
+                        f"Formatting {source_index}/{total_source_tokens}...",
+                    )
+
+        for source_index, source_token in enumerate(tokens, 1):
+            # Non-text tokens are already compact and occur only once.
+            if isinstance(source_token, TableToken):
+                count += 1
+                report_source_progress(source_index)
+
                 # Finish current line first
                 if current_line:
-                    current_y = finish_line(current_line, current_y, current_line_max_h or self.base_font_size)
+                    current_y = finish_line(
+                        current_line,
+                        current_y,
+                        current_line_max_h or self.base_font_size,
+                    )
                     current_line = []
                     current_line_max_h = 0
 
-                # Calculate table dimensions
-                rows = token.rows
+                rows = source_token.rows
                 if rows:
-                    # Calculate column widths (equal distribution for simplicity)
                     num_cols = max(len(row) for row in rows)
-                    col_width = token.max_width // num_cols
+                    col_width = source_token.max_width // num_cols
                     row_height = int(self.base_font_size * 1.5)
                     table_height = len(rows) * row_height
 
-                    # Check if table fits on current page
                     if current_y + table_height > self.height - self.margin_bottom:
-                        # Start new page
                         self.pages.append(current_page)
                         current_page = []
                         current_y = self.margin_top
 
-                    # Add table to page (special marker: 'TABLE' with table data)
-                    current_page.append((self.margin_left, current_y, rows, 'TABLE', col_width, row_height))
-                    current_y += table_height + self.paragraph_spacing * 2
+                    current_page.append(
+                        (
+                            self.margin_left,
+                            current_y,
+                            rows,
+                            'TABLE',
+                            col_width,
+                            row_height,
+                        )
+                    )
+                    current_y += (
+                        table_height
+                        + self.paragraph_spacing * 2
+                    )
 
-                # Reset text position
                 current_x = self.margin_left + self.paragraph_indent
                 continue
 
-            # Handle image tokens
-            if isinstance(token, ImageToken):
+            if isinstance(source_token, ImageToken):
+                count += 1
+                report_source_progress(source_index)
+
                 # Finish current line first
                 if current_line:
-                    current_y = finish_line(current_line, current_y, current_line_max_h or self.base_font_size)
+                    current_y = finish_line(
+                        current_line,
+                        current_y,
+                        current_line_max_h or self.base_font_size,
+                    )
                     current_line = []
                     current_line_max_h = 0
 
-                # Scale image to fit
-                img = token.image
+                img = source_token.image
                 img_w, img_h = img.size
 
-                # Calculate scaled dimensions
-                scale = min(token.max_width / img_w, token.max_height / img_h, 1.0)
+                scale = min(
+                    source_token.max_width / img_w,
+                    source_token.max_height / img_h,
+                    1.0,
+                )
                 new_w = int(img_w * scale)
                 new_h = int(img_h * scale)
 
-                # Check if image fits on current page
                 if current_y + new_h > self.height - self.margin_bottom:
-                    # Start new page
                     self.pages.append(current_page)
                     current_page = []
                     current_y = self.margin_top
 
-                # Add image to page (special marker: 'IMAGE' style with image object)
-                img_x = self.margin_left + (self.text_width - new_w) // 2  # Center image
-                current_page.append((img_x, current_y, img, 'IMAGE', new_w, new_h))
-                current_y += new_h + self.paragraph_spacing * 2
+                img_x = (
+                    self.margin_left
+                    + (self.text_width - new_w) // 2
+                )
+                current_page.append(
+                    (
+                        img_x,
+                        current_y,
+                        img,
+                        'IMAGE',
+                        new_w,
+                        new_h,
+                    )
+                )
+                current_y += (
+                    new_h
+                    + self.paragraph_spacing * 2
+                )
 
-                # Reset text position
                 current_x = self.margin_left + self.paragraph_indent
                 continue
 
-            # Handle text tokens
-            font = self.fonts.get(token.style, self.fonts['normal'])
-            font_h = font_metrics.get(token.style, self.base_font_size)
+            # Text source runs are expanded directly here. This preserves the
+            # exact v4 word/whitespace sequence but removes the generator and
+            # per-fragment proxy object.
+            if source_token.text == "":
+                parts = ("",)
+            else:
+                parts = [
+                    part
+                    for part in split_whitespace(
+                        source_token.text,
+                    )
+                    if part
+                ]
 
-            # Handle headers (no indent, extra space)
-            if token.style in ['h1', 'h2']:
-                if current_line:
-                     current_y = finish_line(current_line, current_y, current_line_max_h or font_h)
-                     current_line = []
-                     current_line_max_h = 0
-                current_x = self.margin_left # Headers not indented
-                current_y += self.paragraph_spacing * 2
+            last_index = len(parts) - 1
+            progress_reported = False
 
-            # Measure token width only
-            try:
-                width = font.getlength(token.text)
-            except:
-                width = len(token.text) * self.base_font_size * 0.6
+            style = source_token.style
+            font = self.fonts.get(style, self.fonts['normal'])
+            font_h = font_metrics.get(
+                style,
+                self.base_font_size,
+            )
 
-            # Check if fits on line
-            if current_x + width > self.width - self.margin_right:
-                # Wrap
-                current_y = finish_line(current_line, current_y, current_line_max_h or font_h)
-                current_line = []
-                current_line_max_h = 0
-                current_x = self.margin_left # Wrapped lines are NOT indented
-                # If whitespace caused wrap, skip it at start of new line
-                if token.text.isspace():
-                    continue
+            for part_index, text in enumerate(parts):
+                count += 1
 
-            current_line.append((token.text, token.style, current_x))
-            current_x += width
-            current_line_max_h = max(current_line_max_h, font_h)
+                if not progress_reported:
+                    report_source_progress(source_index)
+                    progress_reported = True
 
-            if token.new_paragraph:
-                # Force new line
-                current_y = finish_line(current_line, current_y, current_line_max_h or font_h)
-                current_line = []
-                current_line_max_h = 0
-                current_x = self.margin_left + self.paragraph_indent # New paragraph IS indented
-                current_y += self.paragraph_spacing
-                
+                new_paragraph = (
+                    source_token.new_paragraph
+                    and part_index == last_index
+                )
+
+                # Preserve v4 behaviour exactly: header handling happens for
+                # every expanded fragment carrying h1/h2 style.
+                if style in ['h1', 'h2']:
+                    if current_line:
+                        current_y = finish_line(
+                            current_line,
+                            current_y,
+                            current_line_max_h or font_h,
+                        )
+                        current_line = []
+                        current_line_max_h = 0
+                    current_x = self.margin_left
+                    current_y += self.paragraph_spacing * 2
+
+                if text == " ":
+                    width = space_widths[style]
+                else:
+                    width = measure_width(text, style, font)
+
+                if current_x + width > self.width - self.margin_right:
+                    current_y = finish_line(
+                        current_line,
+                        current_y,
+                        current_line_max_h or font_h,
+                    )
+                    current_line = []
+                    current_line_max_h = 0
+                    current_x = self.margin_left
+
+                    # Preserve original behaviour: whitespace that itself
+                    # causes wrapping is discarded on the new line.
+                    if text.isspace():
+                        continue
+
+                current_line.append(
+                    (
+                        text,
+                        style,
+                        current_x,
+                    )
+                )
+                current_x += width
+                if font_h > current_line_max_h:
+                    current_line_max_h = font_h
+
+                if new_paragraph:
+                    current_y = finish_line(
+                        current_line,
+                        current_y,
+                        current_line_max_h or font_h,
+                    )
+                    current_line = []
+                    current_line_max_h = 0
+                    current_x = (
+                        self.margin_left
+                        + self.paragraph_indent
+                    )
+                    current_y += self.paragraph_spacing
+
+        self.logger.info(
+            "Expanded reflow sequence: %d source tokens -> %d layout tokens",
+            total_source_tokens,
+            count,
+        )
+
         # Finish last page
         if current_line:
              finish_line(current_line, current_y, current_line_max_h)
@@ -695,4 +1303,19 @@ class PillowTextRenderer:
 
     def get_page_count(self): return self.page_count
     def get_metadata(self): return {'title': 'Rich Text', 'author': '?'}
-    def close(self): pass
+    def close(self):
+        """Release renderer resources."""
+        if isinstance(self.pages, LazyPageStore):
+            self.pages.close()
+
+        # Remove temporary TTF/OTF files extracted from EPUBs.
+        for font_path in self.custom_fonts.values():
+            try:
+                if os.path.exists(font_path):
+                    os.remove(font_path)
+            except Exception as e:
+                self.logger.debug(
+                    f"Failed to remove temporary font {font_path}: {e}"
+                )
+
+        self.custom_fonts.clear()

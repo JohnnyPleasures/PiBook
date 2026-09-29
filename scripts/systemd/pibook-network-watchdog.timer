@@ -1,0 +1,12 @@
+[Unit]
+Description=Run PiBook network watchdog every minute
+After=pibook-network-startup.service
+
+[Timer]
+OnActiveSec=60s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=pibook-network-watchdog.service
+
+[Install]
+WantedBy=timers.target

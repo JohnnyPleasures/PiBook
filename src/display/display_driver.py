@@ -7,11 +7,23 @@ import sys
 import os
 from PIL import Image
 import logging
+import threading
+from functools import wraps
 
 # Add Waveshare library to path
 LIB_PATH = os.path.join(os.path.dirname(__file__), '../../lib')
 if os.path.exists(LIB_PATH):
     sys.path.insert(0, LIB_PATH)
+
+
+def _serialized_display(method):
+    """Run all controller/SPI operations one at a time."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._io_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class DisplayDriver:
@@ -31,8 +43,15 @@ class DisplayDriver:
         self.width = width
         self.height = height
         self.rotation = rotation
+
+        # Last logical frame successfully presented on the e-paper.
+        # Stored before hardware rotation so Web preview remains 480x800.
+        self._preview_lock = threading.Lock()
+        self._last_display_image = None
         self.epd = None
         self.logger = logging.getLogger(__name__)
+        # Waveshare controller and SPI access are not thread-safe.
+        self._io_lock = threading.RLock()
         self.partial_refresh_count = 0
         self.full_refresh_interval = 5  # Full refresh every N page turns
         self.first_display = True  # Force full refresh on first display
@@ -59,6 +78,7 @@ class DisplayDriver:
             self.logger.warning("Waveshare V2 library not found. Running in mock mode.")
             self.hardware_available = False
 
+    @_serialized_display
     def initialize(self):
         """Initialize the display hardware"""
         if not self.hardware_available:
@@ -67,12 +87,36 @@ class DisplayDriver:
 
         try:
             self.epd = self.epd_module.EPD()
-            self.epd.init()
+
+            # Waveshare officially supports init_fast() on the 7.5" V2.
+            # Use it only for the initial display startup. Later transitions
+            # between FULL/PARTIAL modes keep their existing behaviour.
+            if hasattr(self.epd, 'init_fast'):
+                try:
+                    self.logger.info(
+                        "Initializing e-paper with Waveshare FAST mode"
+                    )
+                    result = self.epd.init_fast()
+                    if result not in (0, None):
+                        raise RuntimeError(
+                            f"init_fast returned {result}"
+                        )
+                except Exception as fast_error:
+                    self.logger.warning(
+                        "FAST display init failed (%s); "
+                        "falling back to normal init",
+                        fast_error,
+                    )
+                    self.epd.init()
+            else:
+                self.epd.init()
+
             self.logger.info("E-ink display initialized successfully")
         except Exception as e:
             self.logger.error(f"Display initialization failed: {e}")
             raise
 
+    @_serialized_display
     def clear(self):
         """Clear the display to white"""
         if not self.hardware_available or not self.epd:
@@ -85,14 +129,19 @@ class DisplayDriver:
         except Exception as e:
             self.logger.error(f"Display clear failed: {e}")
 
-    def display_image(self, image: Image.Image, use_partial: bool = True, skip_counter: bool = False):
+    @_serialized_display
+    def display_image(self, image: Image.Image, use_partial: bool = True, skip_counter: bool = False, enforce_partial_budget: bool = True, strict_partial: bool = False):
         """
         Display a PIL Image on the screen with partial or full refresh
 
         Args:
             image: PIL Image object (will be resized and rotated as needed)
             use_partial: Whether to use partial refresh (if False, forces full refresh)
-            skip_counter: If True, bypass periodic full refresh counter (for non-reader screens)
+            skip_counter: Deprecated compatibility argument.
+            enforce_partial_budget: Apply the configured partial-refresh
+                limit. Reader uses True; menu navigation uses False.
+            strict_partial: Forbid every FULL refresh, including promotion
+                by the partial budget and fallback after PARTIAL failure.
         """
         # Ensure image is correct size
         # NOTE: If this resize happens, there's a bug in the renderer - it should produce
@@ -117,6 +166,11 @@ class DisplayDriver:
             if image.mode == '1':
                 image = image.convert('L')
 
+        # Preserve the logical portrait frame for Web preview.
+        # It only becomes the official cached frame after a successful
+        # hardware display operation below.
+        preview_image = image.copy()
+
         # Apply rotation if needed (for portrait mode)
         if self.rotation != 0:
             # Use BILINEAR for grayscale rotation (smooth), NEAREST for 1-bit (sharp)
@@ -129,6 +183,8 @@ class DisplayDriver:
             output_file = "output/display_output.png"
             os.makedirs("output", exist_ok=True)
             image.save(output_file)
+            with self._preview_lock:
+                self._last_display_image = preview_image
             self.logger.info(f"Mock display: Image saved to {output_file}")
             return
 
@@ -136,6 +192,11 @@ class DisplayDriver:
             # In grayscale mode, always use full refresh (4Gray doesn't support partial)
             # In 1-bit mode, use partial refresh as before
             if self.use_grayscale:
+                if strict_partial:
+                    raise RuntimeError(
+                        "strict_partial unavailable in grayscale mode"
+                    )
+
                 # Grayscale 4-Gray mode - always full refresh
                 self.logger.info(f"Performing 4-Gray FULL refresh")
                 
@@ -158,10 +219,20 @@ class DisplayDriver:
                 if image.mode != '1':
                     image = image.convert('1', dither=Image.Dither.NONE)
                 
-                # Decide whether to use partial or full refresh
-                # Always do full refresh on first display to clear any ghosting from previous session
-                # If skip_counter is True, ignore the periodic refresh counter (for non-reader screens)
-                should_full_refresh = self.first_display or not use_partial or (not skip_counter and self.partial_refresh_count >= self.full_refresh_interval)
+                # The counter represents physical panel history, not app screens.
+                # Reaching N/N makes the next real display request a FULL refresh.
+                should_full_refresh = (
+                    False
+                    if strict_partial
+                    else (
+                        self.first_display
+                        or not use_partial
+                        or (
+                            enforce_partial_budget
+                            and self.partial_refresh_count >= self.full_refresh_interval
+                        )
+                    )
+                )
 
                 if should_full_refresh:
                     # Full refresh - clears ghosting
@@ -195,9 +266,18 @@ class DisplayDriver:
                             # Full screen partial refresh with HARDWARE coordinates (always 800x480)
                             self.epd.display_Partial(buffer_data, 0, 0, self.hw_width, self.hw_height)
                             self.partial_refresh_count += 1
-                            self.logger.info(f"PARTIAL refresh {self.partial_refresh_count}/{self.full_refresh_interval}")
+                            self.logger.info(f"PARTIAL refresh {self.partial_refresh_count}/{self.full_refresh_interval}" if enforce_partial_budget else f"PARTIAL refresh MENU unlimited (physical count={self.partial_refresh_count})")
                         except Exception as e:
-                            self.logger.warning(f"Partial refresh failed: {e}, using full refresh")
+                            if strict_partial:
+                                self.logger.warning(
+                                    "Strict PARTIAL failed: %s; FULL fallback forbidden",
+                                    e,
+                                )
+                                raise
+
+                            self.logger.warning(
+                                f"Partial refresh failed: {e}, using full refresh"
+                            )
                             self.epd.display(buffer_data)
                             self.partial_refresh_count = 0
                             self.partial_mode_initialized = False
@@ -213,19 +293,50 @@ class DisplayDriver:
                             try:
                                 partial_method(buffer_data)
                                 self.partial_refresh_count += 1
-                                self.logger.info(f"PARTIAL refresh {self.partial_refresh_count}/{self.full_refresh_interval}")
+                                self.logger.info(f"PARTIAL refresh {self.partial_refresh_count}/{self.full_refresh_interval}" if enforce_partial_budget else f"PARTIAL refresh MENU unlimited (physical count={self.partial_refresh_count})")
                             except Exception as e:
-                                self.logger.warning(f"Partial refresh failed: {e}, using full refresh")
+                                if strict_partial:
+                                    self.logger.warning(
+                                        "Strict alternate PARTIAL failed: %s; "
+                                        "FULL fallback forbidden",
+                                        e,
+                                    )
+                                    raise
+
+                                self.logger.warning(
+                                    f"Partial refresh failed: {e}, using full refresh"
+                                )
                                 self.epd.display(buffer_data)
                                 self.partial_refresh_count = 0
                         else:
-                            # Partial refresh not supported
-                            self.logger.warning("Partial refresh not available on this display, using full refresh")
+                            # Background refreshes must never silently become FULL.
+                            if strict_partial:
+                                raise RuntimeError(
+                                    "Partial refresh unavailable; FULL fallback forbidden"
+                                )
+
+                            self.logger.warning(
+                                "Partial refresh not available on this display, "
+                                "using full refresh"
+                            )
                             self.epd.display(buffer_data)
+
+            # Only publish the preview after the display operation above
+            # completed successfully. A failed refresh keeps the previous
+            # known-good frame.
+            with self._preview_lock:
+                self._last_display_image = preview_image
 
         except Exception as e:
             self.logger.error(f"Display image failed: {e}")
             raise
+
+    def get_last_display_image(self):
+        """Return a safe copy of the last successfully displayed frame."""
+        with self._preview_lock:
+            if self._last_display_image is None:
+                return None
+            return self._last_display_image.copy()
 
     def set_full_refresh_interval(self, interval: int):
         """
@@ -238,10 +349,12 @@ class DisplayDriver:
         self.logger.info(f"Full refresh interval set to {self.full_refresh_interval}")
 
     def reset_partial_counter(self):
-        """Reset the partial refresh counter (call when changing screens)"""
-        self.partial_refresh_count = 0
-        self.logger.debug("Partial refresh counter reset")
+        """Deprecated: never erase physical panel history without a FULL/Clear."""
+        self.logger.debug(
+            "Ignoring partial counter reset request; physical history preserved"
+        )
 
+    @_serialized_display
     def sleep(self):
         """Put display into low-power sleep mode"""
         if not self.hardware_available or not self.epd:
@@ -254,14 +367,54 @@ class DisplayDriver:
         except Exception as e:
             self.logger.error(f"Display sleep failed: {e}")
 
-    def cleanup(self):
-        """Clean up resources and put display to sleep"""
+    @_serialized_display
+    def cleanup(self, clear_display: bool = True):
+        """Clear the panel, then put it into low-power sleep mode.
+
+        A physical power cut cannot run this method. It is used by normal
+        PiBook exits, SIGTERM/systemd stops and the software shutdown option.
+        """
         if not self.hardware_available or not self.epd:
             self.logger.debug("Mock cleanup")
             return
 
         try:
-            self.epd.sleep()
-            self.logger.info("Display cleaned up")
-        except Exception as e:
-            self.logger.error(f"Display cleanup failed: {e}")
+            if clear_display:
+                try:
+                    self.logger.info(
+                        "Clearing e-paper before shutdown with a full refresh"
+                    )
+
+                    # Return to the normal full-refresh mode first. This is
+                    # important if the last page used partial-refresh mode.
+                    self.epd.init()
+                    self.partial_mode_initialized = False
+                    self.grayscale_initialized = False
+
+                    # Waveshare Clear() performs a complete white refresh and
+                    # waits until the BUSY pin reports completion.
+                    self.epd.Clear()
+                    self.partial_refresh_count = 0
+                    self.first_display = True
+                    self.logger.info("E-paper cleared successfully")
+                except Exception as clear_error:
+                    # A failure to clear must not prevent the panel from
+                    # entering sleep mode.
+                    self.logger.error(
+                        f"Failed to clear e-paper during shutdown: "
+                        f"{clear_error}",
+                        exc_info=True
+                    )
+
+            try:
+                self.epd.sleep()
+                self.logger.info("Display entered deep sleep")
+            except Exception as sleep_error:
+                self.logger.error(
+                    f"Display sleep failed during cleanup: {sleep_error}",
+                    exc_info=True
+                )
+        finally:
+            # Prevent a second cleanup attempt against GPIO/SPI resources that
+            # have already been released by the Waveshare sleep() routine.
+            self.epd = None

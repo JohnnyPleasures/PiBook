@@ -1,0 +1,19 @@
+[Unit]
+Description=PiBook hotspot DHCP (dnsmasq)
+After=pibook-network-hostapd.service pibook-network-captive.service
+Requires=pibook-network-hostapd.service
+ConditionPathExists=/etc/pibook-network/dnsmasq.conf
+
+Wants=pibook-network-captive.service
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/install -d -o root -g root -m 755 /run/pibook-network
+ExecStartPre=/usr/bin/rm -f /run/pibook-network/dnsmasq.pid
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/pibook-network/dnsmasq.conf
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

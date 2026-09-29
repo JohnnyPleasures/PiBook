@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+"""PiBook IP Scanner v2 — descoberta ARP leve da rede local."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import ipaddress
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any
+
+CONFIG_PATH = Path("/etc/pibook-network/config.json")
+RESULTS_PATH = Path("/var/lib/pibook-ip-scanner/results.json")
+
+SERVICE = "pibook-ip-scan.service"
+SYSTEMCTL = "/usr/bin/systemctl"
+IP = "/usr/sbin/ip"
+ARP_SCAN = "/usr/sbin/arp-scan"
+
+
+class ScanError(RuntimeError):
+    pass
+
+
+def now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(
+        timespec="seconds"
+    )
+
+
+def run(command: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            check=False,
+            timeout=timeout,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ScanError("A pesquisa excedeu o tempo permitido.") from exc
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        raise ScanError("Este comando tem de ser executado com sudo.")
+
+
+def read_config() -> dict[str, Any]:
+    try:
+        with CONFIG_PATH.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except Exception as exc:
+        raise ScanError("Não foi possível ler a configuração de rede.") from exc
+
+    if not isinstance(value, dict) or not value.get("interface"):
+        raise ScanError("Interface de rede não configurada.")
+
+    return value
+
+
+def default_results() -> dict[str, Any]:
+    return {
+        "status": "never",
+        "progress": 0,
+        "started_at": "",
+        "generated_at": "",
+        "duration_seconds": 0,
+        "interface": "",
+        "local_ip": "",
+        "network": "",
+        "count": 0,
+        "devices": [],
+        "error": "",
+    }
+
+
+def load_results() -> dict[str, Any]:
+    try:
+        with RESULTS_PATH.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        if isinstance(value, dict):
+            return value
+    except Exception:
+        pass
+    return default_results()
+
+
+def write_results(payload: dict[str, Any]) -> None:
+    import grp
+
+    group_id = grp.getgrnam("pi").gr_gid
+
+    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.chown(RESULTS_PATH.parent, 0, group_id)
+    os.chmod(RESULTS_PATH.parent, 0o750)
+
+    fd, temporary = tempfile.mkstemp(
+        prefix=".ip_scan_results.",
+        dir=str(RESULTS_PATH.parent),
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.chown(temporary, 0, group_id)
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, RESULTS_PATH)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def service_active() -> bool:
+    result = run(
+        [
+            SYSTEMCTL,
+            "show",
+            SERVICE,
+            "--property=ActiveState",
+            "--value",
+        ],
+        timeout=10,
+    )
+    return result.stdout.strip() in {"active", "activating"}
+
+
+def interface_network(interface: str) -> tuple[str, str]:
+    result = run(
+        [IP, "-4", "-o", "address", "show", "dev", interface],
+        timeout=10,
+    )
+
+    if result.returncode != 0:
+        raise ScanError("Não foi possível consultar a interface de rede.")
+
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if "inet" not in parts:
+            continue
+
+        index = parts.index("inet")
+        if index + 1 >= len(parts):
+            continue
+
+        cidr = parts[index + 1]
+        try:
+            address = ipaddress.ip_interface(cidr)
+        except ValueError:
+            continue
+
+        return str(address.ip), str(address.network)
+
+    raise ScanError("A interface não possui endereço IPv4.")
+
+
+def current_neighbours(interface: str) -> list[dict[str, Any]]:
+    """Return useful IPv4 neighbours already known by the kernel."""
+    result = run(
+        [IP, "neigh", "show", "dev", interface],
+        timeout=10,
+    )
+
+    devices: list[dict[str, Any]] = []
+
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+
+        ip_text = parts[0]
+
+        try:
+            address = ipaddress.ip_address(ip_text)
+        except ValueError:
+            continue
+
+        if address.version != 4:
+            continue
+
+        if "lladdr" not in parts:
+            continue
+
+        state = parts[-1].upper()
+        if state in {"FAILED", "INCOMPLETE"}:
+            continue
+
+        index = parts.index("lladdr")
+        if index + 1 >= len(parts):
+            continue
+
+        devices.append({
+            "ip": ip_text,
+            "mac": parts[index + 1],
+            "name": "",
+        })
+
+    return devices
+
+
+def merge_devices(
+    neighbours: list[dict[str, Any]],
+    discovered: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge kernel neighbours and arp-scan results by IPv4 address."""
+    merged: dict[str, dict[str, Any]] = {}
+
+    for device in neighbours:
+        merged[device["ip"]] = dict(device)
+
+    for device in discovered:
+        existing = merged.get(device["ip"])
+        if existing is None:
+            merged[device["ip"]] = dict(device)
+            continue
+
+        if device.get("mac"):
+            existing["mac"] = device["mac"]
+        if device.get("name"):
+            existing["name"] = device["name"]
+
+    return sorted(
+        merged.values(),
+        key=lambda item: ipaddress.ip_address(item["ip"]),
+    )
+
+
+def parse_arp_scan(output: str) -> list[dict[str, Any]]:
+    devices: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+
+        ip_text = parts[0].strip()
+        mac = parts[1].strip()
+
+        try:
+            ipaddress.ip_address(ip_text)
+        except ValueError:
+            continue
+
+        if ip_text in seen:
+            continue
+        seen.add(ip_text)
+
+        vendor = parts[2].strip() if len(parts) >= 3 else ""
+
+        devices.append({
+            "ip": ip_text,
+            "mac": mac,
+            "name": vendor,
+        })
+
+    devices.sort(key=lambda item: ipaddress.ip_address(item["ip"]))
+    return devices
+
+
+def start_scan(config: dict[str, Any]) -> dict[str, Any]:
+    require_root()
+
+    if service_active():
+        return {
+            "started": False,
+            "status": "already_scanning",
+        }
+
+    interface = str(config["interface"])
+    local_ip, network = interface_network(interface)
+    started_at = now_iso()
+
+    payload = default_results()
+    payload.update({
+        "status": "queued",
+        "progress": 0,
+        "started_at": started_at,
+        "interface": interface,
+        "local_ip": local_ip,
+        "network": network,
+    })
+    write_results(payload)
+
+    run([SYSTEMCTL, "reset-failed", SERVICE], timeout=10)
+    result = run(
+        [SYSTEMCTL, "--no-block", "start", SERVICE],
+        timeout=15,
+    )
+
+    if result.returncode != 0:
+        raise ScanError(
+            result.stderr.strip()
+            or "Não foi possível iniciar o serviço de pesquisa."
+        )
+
+    return {
+        "started": True,
+        "status": "queued",
+    }
+
+
+def worker(config: dict[str, Any]) -> dict[str, Any]:
+    require_root()
+
+    interface = str(config["interface"])
+    started_monotonic = time.monotonic()
+    previous = load_results()
+    started_at = previous.get("started_at") or now_iso()
+
+    local_ip, network = interface_network(interface)
+
+    running = default_results()
+    running.update({
+        "status": "running",
+        "progress": 15,
+        "started_at": started_at,
+        "interface": interface,
+        "local_ip": local_ip,
+        "network": network,
+    })
+    write_results(running)
+
+    devices: list[dict[str, Any]] = []
+    error = ""
+
+    neighbours = current_neighbours(interface)
+
+    try:
+        result = run(
+            [
+                ARP_SCAN,
+                f"--interface={interface}",
+                "--localnet",
+                "--plain",
+            ],
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            raise ScanError(
+                result.stderr.strip()
+                or f"arp-scan terminou com código {result.returncode}."
+            )
+
+        discovered = parse_arp_scan(result.stdout)
+        devices = merge_devices(neighbours, discovered)
+
+    except Exception as exc:
+        error = str(exc)
+        devices = merge_devices(neighbours, [])
+
+    completed = now_iso()
+    payload = {
+        "status": "error" if error else "success",
+        "progress": 100,
+        "started_at": started_at,
+        "generated_at": completed,
+        "duration_seconds": round(
+            time.monotonic() - started_monotonic,
+            2,
+        ),
+        "interface": interface,
+        "local_ip": local_ip,
+        "network": network,
+        "count": len(devices),
+        "devices": devices,
+        "error": error,
+    }
+    write_results(payload)
+
+    if error:
+        raise ScanError(error)
+
+    return payload
+
+
+def print_json(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="PiBook IP Scanner v2")
+    parser.add_argument(
+        "command",
+        choices=("start", "worker", "status", "results"),
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    try:
+        require_root()
+        args = parse_args()
+
+        if args.command == "results":
+            print_json(load_results())
+            return 0
+
+        if args.command == "status":
+            payload = load_results()
+            payload["scanning"] = (
+                str(payload.get("status", "")).lower()
+                in {"queued", "running"}
+            )
+            print_json(payload)
+            return 0
+
+        config = read_config()
+
+        if args.command == "start":
+            print_json(start_scan(config))
+            return 0
+
+        if args.command == "worker":
+            worker(config)
+            return 0
+
+        return 1
+
+    except ScanError as exc:
+        print(f"ERRO: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

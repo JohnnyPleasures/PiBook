@@ -1,0 +1,33 @@
+[Unit]
+Description=PiBook network startup coordinator
+Documentation=file:/etc/pibook-network/startup.json
+After=systemd-udev-settle.service
+ConditionPathExists=/etc/pibook-network/startup.json
+ConditionPathExists=/usr/local/sbin/pibook-network-startup
+ConditionPathExists=/usr/local/sbin/pibook-networkctl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pibook-network-startup
+RemainAfterExit=yes
+TimeoutStartSec=10min
+RuntimeDirectory=pibook-network
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=pibook-network
+StateDirectoryMode=0700
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/pibook-network /var/lib/pibook-network
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

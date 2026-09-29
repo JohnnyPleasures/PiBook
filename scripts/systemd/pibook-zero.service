@@ -1,0 +1,18 @@
+[Unit]
+Description=PiBook E-Reader para Raspberry Pi Zero W
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=gpio spi i2c
+WorkingDirectory=/home/pi/PiBook
+Environment=PIBOOK_CONFIG=/home/pi/PiBook/config/config.yaml
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/PiBook/.venv/bin/python /home/pi/PiBook/src/main.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

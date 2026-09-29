@@ -1,0 +1,1026 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+CONFIG_PATH = Path("/etc/pibook-network/watchdog.json")
+STARTUP_CONFIG_PATH = Path("/etc/pibook-network/startup.json")
+STATE_PATH = Path("/var/lib/pibook-network/watchdog_state.json")
+RESULT_PATH = Path("/var/lib/pibook-network/watchdog_result.json")
+LOCK_PATH = Path("/run/pibook-network/watchdog.lock")
+NETWORKCTL = "/usr/local/sbin/pibook-networkctl"
+AVAHI_SERVICE = "avahi-daemon.service"
+AVAHI_RESOLVE = "/usr/bin/avahi-resolve-host-name"
+PS = "/usr/bin/ps"
+MDNS_NAME = "pibook.local"
+
+TRANSITION_UNITS = (
+    "pibook-wifi-scan.service",
+    "pibook-wifi-connect.service",
+)
+
+HOTSPOT_UNITS = (
+    "pibook-network-hostapd.service",
+    "pibook-network-dnsmasq.service",
+    "pibook-network-captive.service",
+)
+
+
+def now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def boot_id() -> str:
+    return (
+        Path("/proc/sys/kernel/random/boot_id")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+
+
+def log(message: str) -> None:
+    print(f"{now_iso()} {message}", flush=True)
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def load_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not path.exists():
+        if default is None:
+            raise FileNotFoundError(path)
+        return dict(default)
+
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def run(
+    args: list[str],
+    *,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    log("EXEC: " + " ".join(args))
+    result = subprocess.run(
+        args,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+    if result.stdout.strip():
+        log("STDOUT: " + result.stdout.strip())
+    if result.stderr.strip():
+        log("STDERR: " + result.stderr.strip())
+
+    return result
+
+
+def unit_active(unit: str) -> bool:
+    return (
+        subprocess.run(
+            ["systemctl", "is-active", "--quiet", unit],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
+def avahi_advertised_name() -> str:
+    # O chamador já confirmou que avahi-daemon está ativo.
+    # Evita uma segunda chamada systemctl em cada ciclo saudável.
+    try:
+        r = subprocess.run(
+            [PS, "-C", "avahi-daemon", "-o", "args="],
+            text=True, capture_output=True, timeout=3, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if r.returncode != 0:
+        return ""
+    marker = "running ["
+    for line in r.stdout.splitlines():
+        if marker in line:
+            name = line.split(marker, 1)[1].split("]", 1)[0].strip()
+            if name.endswith(".local"):
+                return name
+    return ""
+
+
+def resolve_mdns_ipv4(name: str) -> str:
+    try:
+        r = subprocess.run(
+            [AVAHI_RESOLVE, "-4", name],
+            text=True, capture_output=True, timeout=4, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if r.returncode != 0:
+        return ""
+    for line in r.stdout.splitlines():
+        fields=line.split()
+        if len(fields) >= 2:
+            return fields[-1].strip()
+    return ""
+
+
+def tcp_port_open(
+    host: str,
+    port: int,
+    timeout_seconds: float = 0.75,
+) -> bool:
+    try:
+        with socket.create_connection(
+            (host, port),
+            timeout=timeout_seconds,
+        ):
+            return True
+    except OSError:
+        return False
+
+
+def wait_for_tcp_port(
+    host: str,
+    port: int,
+    timeout_seconds: int,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+
+    while time.monotonic() < deadline:
+        if tcp_port_open(host, port):
+            log(f"Porta TCP pronta: {host}:{port}")
+            return True
+        time.sleep(1)
+
+    return False
+
+
+def status_payload() -> dict[str, Any]:
+    """Estado rápido da rede sem arrancar outro processo Python."""
+    network_config = load_json(
+        Path("/etc/pibook-network/config.json")
+    )
+    network_state = load_json(
+        Path("/var/lib/pibook-network/state.json")
+    )
+
+    interface = str(network_config.get("interface", "wlan0"))
+
+    hostapd_active = unit_active(HOTSPOT_UNITS[0])
+    dnsmasq_active = unit_active(HOTSPOT_UNITS[1])
+
+    # Hotspot mode intentionally keeps NetworkManager stopped.
+    # Do not call nmcli while it is inactive, because nmcli may activate
+    # NetworkManager again through D-Bus.
+    if unit_active("NetworkManager.service"):
+        nm = subprocess.run(
+            [
+                "nmcli",
+                "-g",
+                "GENERAL.CON-UUID,GENERAL.CONNECTION",
+                "device",
+                "show",
+                interface,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+        nm_lines = nm.stdout.splitlines() if nm.returncode == 0 else []
+        wifi_uuid = nm_lines[0].strip() if len(nm_lines) >= 1 else ""
+        wifi_name = nm_lines[1].strip() if len(nm_lines) >= 2 else ""
+    else:
+        wifi_uuid = ""
+        wifi_name = ""
+
+    if wifi_uuid == "--":
+        wifi_uuid = ""
+    if wifi_name == "--":
+        wifi_name = ""
+
+    iw = subprocess.run(
+        ["iw", "dev", interface, "info"],
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    interface_type = ""
+    if iw.returncode == 0:
+        for line in iw.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("type "):
+                interface_type = stripped.split(maxsplit=1)[1]
+                break
+
+    ip = subprocess.run(
+        ["ip", "-4", "-o", "address", "show", "dev", interface],
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    addresses = []
+    if ip.returncode == 0:
+        for line in ip.stdout.splitlines():
+            parts = line.split()
+            if "inet" in parts:
+                index = parts.index("inet")
+                if index + 1 < len(parts):
+                    addresses.append(parts[index + 1])
+
+    hotspot_address = str(
+        network_config.get("hotspot_address", "10.42.0.1/24")
+    )
+
+    if (
+        hostapd_active
+        and dnsmasq_active
+        and interface_type == "AP"
+        and hotspot_address in addresses
+    ):
+        mode = "hotspot"
+    elif wifi_uuid:
+        mode = "wifi"
+    elif not hostapd_active and not dnsmasq_active and not addresses:
+        mode = "disconnected"
+    else:
+        mode = "transition"
+
+    return {
+        "state": network_state,
+        "actual": {
+            "mode": mode,
+            "interface": interface,
+            "interface_type": interface_type,
+            "addresses": addresses,
+            "wifi_uuid": wifi_uuid,
+            "wifi_name": wifi_name,
+            "hostapd_active": hostapd_active,
+            "dnsmasq_active": dnsmasq_active,
+            "hotspot_ssid": network_config.get("hotspot_ssid", "PiBook"),
+            "hotspot_url": (
+                "http://"
+                + hotspot_address.split("/", 1)[0]
+                + ":5000"
+            ),
+        },
+    }
+
+
+def transition_in_progress(payload: dict[str, Any]) -> tuple[bool, str]:
+    state = payload.get("state", {})
+    operation = str(state.get("operation", "unknown"))
+
+    if operation != "idle":
+        return True, f"operation={operation}"
+
+    active_units = [unit for unit in TRANSITION_UNITS if unit_active(unit)]
+
+    if active_units:
+        return True, "unidades ativas: " + ", ".join(active_units)
+
+    return False, ""
+
+
+def health_for(payload: dict[str, Any]) -> dict[str, Any]:
+    state = payload.get("state", {})
+    actual = payload.get("actual", {})
+
+    desired_mode = str(state.get("desired_mode", "unknown"))
+    actual_mode = str(actual.get("mode", "unknown"))
+    operation = str(state.get("operation", "unknown"))
+    addresses = actual.get("addresses", [])
+
+    if isinstance(addresses, str):
+        addresses = [addresses]
+
+    reasons: list[str] = []
+
+    if operation != "idle":
+        reasons.append(f"operation={operation}")
+
+    if desired_mode == "hotspot":
+        if actual_mode != "hotspot":
+            reasons.append(f"actual_mode={actual_mode}")
+        if "10.42.0.1/24" not in addresses:
+            reasons.append("endereço hotspot ausente")
+        if actual.get("hostapd_active") is not True:
+            reasons.append("hostapd inativo")
+        if actual.get("dnsmasq_active") is not True:
+            reasons.append("dnsmasq inativo")
+        portal_active = unit_active(
+            "pibook-network-captive.service"
+        )
+        if not portal_active:
+            reasons.append("portal cativo inativo")
+        elif not tcp_port_open("127.0.0.1", 80):
+            reasons.append("porta 80 indisponível")
+
+    elif desired_mode == "wifi":
+        if actual_mode != "wifi":
+            reasons.append(f"actual_mode={actual_mode}")
+
+        wifi_uuid = str(actual.get("wifi_uuid", ""))
+        if not wifi_uuid:
+            reasons.append("UUID Wi-Fi ausente")
+
+        usable_ipv4_addresses = [
+            str(address).split("/", 1)[0]
+            for address in addresses
+            if (
+                isinstance(address, str)
+                and "." in address
+                and not address.startswith("10.42.0.")
+            )
+        ]
+
+        if not usable_ipv4_addresses:
+            reasons.append("IPv4 Wi-Fi ausente")
+
+        if actual.get("hostapd_active") is True:
+            reasons.append("hostapd ativo em modo Wi-Fi")
+        if actual.get("dnsmasq_active") is True:
+            reasons.append("dnsmasq ativo em modo Wi-Fi")
+
+        if actual_mode == "wifi" and wifi_uuid and usable_ipv4_addresses:
+            if not unit_active(AVAHI_SERVICE):
+                reasons.append("avahi inativo")
+            else:
+                advertised = avahi_advertised_name()
+                if advertised != MDNS_NAME:
+                    reasons.append(
+                        "mDNS nome incorreto: "
+                        + (advertised or "indefinido")
+                    )
+                else:
+                    resolved = resolve_mdns_ipv4(MDNS_NAME)
+                    if not resolved:
+                        reasons.append("mDNS pibook.local indisponível")
+                    elif resolved not in usable_ipv4_addresses:
+                        reasons.append(
+                            f"mDNS pibook.local aponta para {resolved}"
+                        )
+
+    elif desired_mode == "off":
+        return {
+            "healthy": True,
+            "desired_mode": desired_mode,
+            "actual_mode": actual_mode,
+            "reasons": [],
+            "managed": False,
+            "message": "Modo off não é recuperado pelo watchdog.",
+        }
+
+    else:
+        reasons.append(f"desired_mode não suportado: {desired_mode}")
+
+    return {
+        "healthy": not reasons,
+        "desired_mode": desired_mode,
+        "actual_mode": actual_mode,
+        "reasons": reasons,
+        "managed": desired_mode in {"hotspot", "wifi"},
+        "message": "saudável" if not reasons else "; ".join(reasons),
+    }
+
+
+def load_watchdog_state() -> dict[str, Any]:
+    return load_json(
+        STATE_PATH,
+        {
+            "recoveries": [],
+            "last_attempt_epoch": 0.0,
+            "last_success_epoch": 0.0,
+            "last_failure_epoch": 0.0,
+        },
+    )
+
+
+def save_watchdog_state(state: dict[str, Any]) -> None:
+    atomic_write_json(STATE_PATH, state)
+
+
+def write_result(
+    *,
+    status: str,
+    action: str,
+    message: str,
+    health_before: dict[str, Any] | None,
+    health_after: dict[str, Any] | None,
+    errors: list[str],
+    recovery_count_hour: int,
+) -> None:
+    atomic_write_json(
+        RESULT_PATH,
+        {
+            "status": status,
+            "action": action,
+            "message": message,
+            "health_before": health_before,
+            "health_after": health_after,
+            "errors": errors,
+            "recovery_count_hour": recovery_count_hour,
+            "checked_at": now_iso(),
+            "boot_id": boot_id(),
+        },
+    )
+
+
+def recovery_plan(
+    desired_mode: str,
+    payload: dict[str, Any],
+    health: dict[str, Any],
+) -> tuple[str, list[list[str]]]:
+    reasons = {str(value) for value in health.get("reasons", [])}
+
+    if desired_mode == "hotspot":
+        actual = payload.get("actual", {})
+        addresses = actual.get("addresses", [])
+        if isinstance(addresses, str):
+            addresses = [addresses]
+
+        structural_hotspot_ok = (
+            actual.get("interface_type") == "AP"
+            and "10.42.0.1/24" in addresses
+            and actual.get("hostapd_active") is True
+        )
+
+        effective_reasons = set(reasons)
+        if structural_hotspot_ok:
+            effective_reasons.discard("actual_mode=transition")
+
+        portal_reasons = {
+            "portal cativo inativo",
+            "porta 80 indisponível",
+        }
+
+        if (
+            effective_reasons
+            and effective_reasons.issubset(portal_reasons)
+        ):
+            return (
+                "recover_hotspot_portal",
+                [[
+                    "/usr/bin/systemctl",
+                    "restart",
+                    "pibook-network-captive.service",
+                ]],
+            )
+
+        if (
+            "dnsmasq inativo" in effective_reasons
+            and effective_reasons.issubset(
+                {"dnsmasq inativo"}.union(portal_reasons)
+            )
+        ):
+            return (
+                "recover_hotspot_services",
+                [
+                    [
+                        "/usr/bin/systemctl",
+                        "restart",
+                        "pibook-network-dnsmasq.service",
+                    ],
+                    [
+                        "/usr/bin/systemctl",
+                        "start",
+                        "pibook-network-captive.service",
+                    ],
+                ],
+            )
+
+        return (
+            "recover_hotspot",
+            [
+                [NETWORKCTL, "hotspot"],
+                [
+                    "/usr/bin/systemctl",
+                    "start",
+                    "pibook-network-captive.service",
+                ],
+            ],
+        )
+
+    if desired_mode == "wifi":
+        mdns_reasons = {
+            reason for reason in reasons
+            if reason == "avahi inativo" or reason.startswith("mDNS ")
+        }
+        network_reasons = reasons.difference(mdns_reasons)
+
+        if mdns_reasons and not network_reasons:
+            return (
+                "recover_mdns",
+                [[
+                    "/usr/bin/systemctl",
+                    "restart",
+                    AVAHI_SERVICE,
+                ]],
+            )
+
+        state = payload.get("state", {})
+        uuid = str(state.get("last_wifi_uuid", "")).strip()
+
+        if not uuid and STARTUP_CONFIG_PATH.exists():
+            startup = load_json(STARTUP_CONFIG_PATH)
+            uuid = str(startup.get("fallback_wifi_uuid", "")).strip()
+
+        if not uuid:
+            raise RuntimeError(
+                "Não existe UUID Wi-Fi para recuperação."
+            )
+
+        return (
+            "recover_wifi",
+            [
+                [NETWORKCTL, "wifi", uuid],
+                [
+                    "/usr/bin/systemctl",
+                    "restart",
+                    AVAHI_SERVICE,
+                ],
+            ],
+        )
+
+    raise RuntimeError(
+        f"Modo não recuperável pelo watchdog: {desired_mode}"
+    )
+
+
+def validate_environment() -> None:
+    config = load_json(CONFIG_PATH)
+    required_config = {
+        "confirmation_delay_seconds",
+        "cooldown_seconds",
+        "max_recoveries_per_hour",
+        "recovery_timeout_seconds",
+        "post_recovery_delay_seconds",
+    }
+
+    missing = required_config.difference(config)
+    if missing:
+        raise RuntimeError(
+            "Configuração incompleta: " + ", ".join(sorted(missing))
+        )
+
+    for command in (
+        NETWORKCTL,
+        "/usr/bin/systemctl",
+        AVAHI_RESOLVE,
+        PS,
+    ):
+        if not Path(command).exists():
+            raise RuntimeError(f"Executável em falta: {command}")
+
+    payload = status_payload()
+    state = payload.get("state", {})
+
+    if "desired_mode" not in state or "operation" not in state:
+        raise RuntimeError("JSON de estado sem campos obrigatórios.")
+
+
+def perform_check() -> int:
+    config = load_json(CONFIG_PATH)
+    errors: list[str] = []
+
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    with LOCK_PATH.open("w", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(
+                lock_file.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError:
+            write_result(
+                status="skipped",
+                action="none",
+                message="Já existe uma verificação em curso.",
+                health_before=None,
+                health_after=None,
+                errors=[],
+                recovery_count_hour=0,
+            )
+            log("SKIP: já existe uma verificação em curso.")
+            return 0
+
+        try:
+            first_payload = status_payload()
+        except Exception as exc:
+            message = f"Falha ao ler o estado inicial: {exc}"
+            write_result(
+                status="error",
+                action="none",
+                message=message,
+                health_before=None,
+                health_after=None,
+                errors=[message],
+                recovery_count_hour=0,
+            )
+            log("ERRO: " + message)
+            return 0
+
+        state = first_payload.get("state", {})
+        operation = str(state.get("operation", "unknown"))
+
+        # No caminho saudável não é necessário consultar serviços systemd
+        # de transição. O próprio estado persistido permite detetar uma
+        # operação de rede explicitamente em curso sem subprocessos extra.
+        if operation != "idle":
+            message = "Transição de rede em curso: operation=" + operation
+            write_result(
+                status="skipped",
+                action="none",
+                message=message,
+                health_before=None,
+                health_after=None,
+                errors=[],
+                recovery_count_hour=0,
+            )
+            log("SKIP: " + message)
+            return 0
+
+        actual = first_payload.get("actual", {})
+
+        wifi_offline_idle = (
+            str(state.get("desired_mode", "")) == "wifi"
+            and str(state.get("operation", "")) == "idle"
+            and str(actual.get("mode", "")) == "disconnected"
+            and str(actual.get("interface_type", "")) == "managed"
+            and bool(str(state.get("last_wifi_uuid", "")).strip())
+            and actual.get("hostapd_active") is not True
+            and actual.get("dnsmasq_active") is not True
+        )
+
+        if wifi_offline_idle:
+            message = "Wi-Fi indisponível; NetworkManager aguardará pela rede."
+            write_result(
+                status="offline_idle",
+                action="none",
+                message=message,
+                health_before=None,
+                health_after=None,
+                errors=[],
+                recovery_count_hour=0,
+            )
+            log("IDLE: Wi-Fi fora de alcance; sem recuperação.")
+            return 0
+
+        first_health = health_for(first_payload)
+
+        if not first_health["managed"]:
+            message = first_health["message"]
+            write_result(
+                status="skipped",
+                action="none",
+                message=message,
+                health_before=first_health,
+                health_after=first_health,
+                errors=[],
+                recovery_count_hour=0,
+            )
+            log("SKIP: " + message)
+            return 0
+
+        if first_health["healthy"]:
+            watchdog_state = load_watchdog_state()
+            now_epoch = time.time()
+            recent = [
+                float(value)
+                for value in watchdog_state.get("recoveries", [])
+                if now_epoch - float(value) < 3600
+            ]
+            watchdog_state["recoveries"] = recent
+            save_watchdog_state(watchdog_state)
+
+            write_result(
+                status="healthy",
+                action="none",
+                message="Rede e mDNS saudáveis; nenhuma ação executada.",
+                health_before=first_health,
+                health_after=first_health,
+                errors=[],
+                recovery_count_hour=len(recent),
+            )
+            log("OK: rede saudável.")
+            return 0
+
+        # Só uma rede que parece realmente degradada justifica consultar
+        # os serviços temporários de scan/connect. Assim evitamos duas
+        # chamadas systemctl em cada ciclo saudável.
+        busy, busy_reason = transition_in_progress(first_payload)
+        if busy:
+            message = "Transição de rede em curso: " + busy_reason
+            write_result(
+                status="skipped",
+                action="none",
+                message=message,
+                health_before=first_health,
+                health_after=None,
+                errors=[],
+                recovery_count_hour=0,
+            )
+            log("SKIP: " + message)
+            return 0
+
+        delay = int(config["confirmation_delay_seconds"])
+        log(
+            "Falha inicial detetada; confirmação em "
+            f"{delay} segundos: {first_health['message']}"
+        )
+        time.sleep(delay)
+
+        try:
+            second_payload = status_payload()
+        except Exception as exc:
+            message = f"Falha ao confirmar o estado: {exc}"
+            write_result(
+                status="error",
+                action="none",
+                message=message,
+                health_before=first_health,
+                health_after=None,
+                errors=[message],
+                recovery_count_hour=0,
+            )
+            log("ERRO: " + message)
+            return 0
+
+        busy, busy_reason = transition_in_progress(second_payload)
+        if busy:
+            message = (
+                "A rede entrou em transição durante a confirmação: "
+                + busy_reason
+            )
+            write_result(
+                status="skipped",
+                action="none",
+                message=message,
+                health_before=first_health,
+                health_after=None,
+                errors=[],
+                recovery_count_hour=0,
+            )
+            log("SKIP: " + message)
+            return 0
+
+        second_health = health_for(second_payload)
+
+        if second_health["healthy"]:
+            write_result(
+                status="recovered_without_action",
+                action="none",
+                message="A rede recuperou durante a confirmação.",
+                health_before=first_health,
+                health_after=second_health,
+                errors=[],
+                recovery_count_hour=0,
+            )
+            log("OK: recuperação espontânea.")
+            return 0
+
+        watchdog_state = load_watchdog_state()
+        now_epoch = time.time()
+        recent = [
+            float(value)
+            for value in watchdog_state.get("recoveries", [])
+            if now_epoch - float(value) < 3600
+        ]
+        last_attempt = float(
+            watchdog_state.get("last_attempt_epoch", 0.0)
+        )
+        cooldown = int(config["cooldown_seconds"])
+        max_hour = int(config["max_recoveries_per_hour"])
+
+        if now_epoch - last_attempt < cooldown:
+            remaining = int(cooldown - (now_epoch - last_attempt))
+            message = (
+                "Falha confirmada, mas o cooldown ainda está ativo "
+                f"por aproximadamente {remaining} segundos."
+            )
+            write_result(
+                status="throttled",
+                action="none",
+                message=message,
+                health_before=second_health,
+                health_after=None,
+                errors=[],
+                recovery_count_hour=len(recent),
+            )
+            log("THROTTLE: " + message)
+            return 0
+
+        if len(recent) >= max_hour:
+            message = (
+                "Falha confirmada, mas foi atingido o limite de "
+                f"{max_hour} recuperações por hora."
+            )
+            write_result(
+                status="throttled",
+                action="none",
+                message=message,
+                health_before=second_health,
+                health_after=None,
+                errors=[],
+                recovery_count_hour=len(recent),
+            )
+            log("THROTTLE: " + message)
+            return 0
+
+        desired_mode = str(second_health["desired_mode"])
+
+        try:
+            action, commands = recovery_plan(
+                desired_mode,
+                second_payload,
+                second_health,
+            )
+        except Exception as exc:
+            message = str(exc)
+            write_result(
+                status="error",
+                action="none",
+                message=message,
+                health_before=second_health,
+                health_after=None,
+                errors=[message],
+                recovery_count_hour=len(recent),
+            )
+            log("ERRO: " + message)
+            return 0
+
+        watchdog_state["last_attempt_epoch"] = now_epoch
+        watchdog_state["recoveries"] = recent + [now_epoch]
+        save_watchdog_state(watchdog_state)
+
+        timeout_seconds = int(config["recovery_timeout_seconds"])
+
+        for command in commands:
+            command_timeout = (
+                timeout_seconds if command[0] == NETWORKCTL else 30
+            )
+
+            try:
+                result = run(command, timeout=command_timeout)
+            except subprocess.TimeoutExpired:
+                errors.append(
+                    "Comando de recuperação excedeu "
+                    f"{command_timeout} segundos: {' '.join(command)}"
+                )
+                break
+            except Exception as exc:
+                errors.append(
+                    "Exceção durante recuperação "
+                    f"({' '.join(command)}): {exc}"
+                )
+                break
+
+            if result.returncode != 0:
+                errors.append(
+                    "Comando de recuperação terminou com "
+                    f"código {result.returncode}: {' '.join(command)}"
+                )
+                break
+
+        if (
+            desired_mode == "hotspot"
+            and not errors
+            and action in {
+                "recover_hotspot_portal",
+                "recover_hotspot_services",
+                "recover_hotspot",
+            }
+        ):
+            ready_timeout = int(
+                config.get("portal_ready_timeout_seconds", 30)
+            )
+            if not wait_for_tcp_port(
+                "127.0.0.1",
+                80,
+                ready_timeout,
+            ):
+                errors.append(
+                    "A porta 80 não ficou pronta após "
+                    f"{ready_timeout} segundos."
+                )
+
+        time.sleep(int(config["post_recovery_delay_seconds"]))
+
+        try:
+            final_payload = status_payload()
+            final_health = health_for(final_payload)
+        except Exception as exc:
+            final_health = None
+            errors.append(
+                f"Falha ao validar a recuperação: {exc}"
+            )
+
+        final_state = load_watchdog_state()
+
+        if final_health is not None and final_health["healthy"]:
+            final_state["last_success_epoch"] = time.time()
+            save_watchdog_state(final_state)
+            write_result(
+                status="recovered",
+                action=action,
+                message="Rede recuperada com sucesso.",
+                health_before=second_health,
+                health_after=final_health,
+                errors=errors,
+                recovery_count_hour=len(recent) + 1,
+            )
+            log("RECUPERADO: " + action)
+            return 0
+
+        final_state["last_failure_epoch"] = time.time()
+        save_watchdog_state(final_state)
+        message = "A tentativa de recuperação não restaurou a rede."
+        write_result(
+            status="recovery_failed",
+            action=action,
+            message=message,
+            health_before=second_health,
+            health_after=final_health,
+            errors=errors,
+            recovery_count_hour=len(recent) + 1,
+        )
+        log("ERRO: " + message)
+        return 0
+
+
+def show_status() -> int:
+    if RESULT_PATH.exists():
+        print(RESULT_PATH.read_text(encoding="utf-8"), end="")
+    else:
+        print(
+            json.dumps(
+                {
+                    "status": "never_run",
+                    "message": "O watchdog ainda não foi executado.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "command",
+        choices=("check", "status", "validate"),
+    )
+    args = parser.parse_args()
+
+    if args.command == "validate":
+        validate_environment()
+        print("Validação do watchdog: OK")
+        return 0
+
+    if args.command == "status":
+        return show_status()
+
+    return perform_check()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        log(f"ERRO FATAL: {exc}")
+        try:
+            write_result(
+                status="fatal_error",
+                action="none",
+                message=str(exc),
+                health_before=None,
+                health_after=None,
+                errors=[str(exc)],
+                recovery_count_hour=0,
+            )
+        except Exception:
+            pass
+        sys.exit(1)

@@ -8,6 +8,7 @@ from collections import OrderedDict
 from PIL import Image
 import logging
 import gc
+import threading
 
 
 class PageCache:
@@ -27,6 +28,7 @@ class PageCache:
         self.cache: OrderedDict[int, Image.Image] = OrderedDict()
         self.hits = 0
         self.misses = 0
+        self._lock = threading.RLock()
 
     def get(self, page_num: int) -> Image.Image | None:
         """
@@ -38,16 +40,17 @@ class PageCache:
         Returns:
             Cached PIL Image or None if not in cache
         """
-        if page_num in self.cache:
-            # Move to end (most recently used)
-            self.cache.move_to_end(page_num)
-            self.hits += 1
-            self.logger.debug(f"Cache hit: page {page_num}")
-            return self.cache[page_num]
+        with self._lock:
+            if page_num in self.cache:
+                # Move to end (most recently used)
+                self.cache.move_to_end(page_num)
+                self.hits += 1
+                self.logger.debug(f"Cache hit: page {page_num}")
+                return self.cache[page_num]
 
-        self.misses += 1
-        self.logger.debug(f"Cache miss: page {page_num}")
-        return None
+            self.misses += 1
+            self.logger.debug(f"Cache miss: page {page_num}")
+            return None
 
     def put(self, page_num: int, image: Image.Image):
         """
@@ -57,29 +60,74 @@ class PageCache:
             page_num: Page number
             image: PIL Image to cache
         """
-        # If page already in cache, move to end
-        if page_num in self.cache:
-            self.cache.move_to_end(page_num)
+        with self._lock:
+            # If page already in cache, move to end
+            if page_num in self.cache:
+                self.cache.move_to_end(page_num)
+                self.cache[page_num] = image
+                self.logger.debug(f"Updated cache: page {page_num}")
+                return
+
+            # If cache is full, remove oldest (first) item
+            if len(self.cache) >= self.max_size:
+                oldest_page = next(iter(self.cache))
+                del self.cache[oldest_page]
+                self.logger.debug(f"Evicted page {oldest_page} from cache")
+
+                # Suggest garbage collection on memory-constrained devices
+                # GC explícito removido: uma única evicção não justifica full GC.
+
+            # Add new page
             self.cache[page_num] = image
-            self.logger.debug(f"Updated cache: page {page_num}")
-            return
+            self.logger.debug(
+                f"Cached page {page_num} (cache size: {len(self.cache)})"
+            )
 
-        # If cache is full, remove oldest (first) item
-        if len(self.cache) >= self.max_size:
-            oldest_page = next(iter(self.cache))
-            del self.cache[oldest_page]
-            self.logger.debug(f"Evicted page {oldest_page} from cache")
+    def retain_only(self, page_numbers):
+        """Keep only pages belonging to the requested Reader window."""
+        wanted = set(page_numbers)
 
-            # Suggest garbage collection on memory-constrained devices
-            gc.collect()
+        with self._lock:
+            removed = [
+                page_num
+                for page_num in list(self.cache.keys())
+                if page_num not in wanted
+            ]
 
-        # Add new page
-        self.cache[page_num] = image
-        self.logger.debug(f"Cached page {page_num} (cache size: {len(self.cache)})")
+            for page_num in removed:
+                del self.cache[page_num]
+
+        if removed:
+            self.logger.debug(
+                "Removed %d cached page(s) outside active Reader window",
+                len(removed),
+            )
+
+    def resize(self, max_size: int):
+        """Resize the cache while preserving the most recently used pages."""
+        new_size = max(1, int(max_size))
+
+        with self._lock:
+            self.max_size = new_size
+
+            while len(self.cache) > self.max_size:
+                oldest_page = next(iter(self.cache))
+                del self.cache[oldest_page]
+                self.logger.debug(
+                    f"Evicted page {oldest_page} while resizing cache"
+                )
+
+        self.logger.debug(f"Page cache resized to {new_size}")
+
+    def contains(self, page_num: int) -> bool:
+        """Check cache membership without changing hit/miss statistics."""
+        with self._lock:
+            return page_num in self.cache
 
     def clear(self):
         """Clear all cached pages"""
-        self.cache.clear()
+        with self._lock:
+            self.cache.clear()
         self.logger.info("Page cache cleared")
         gc.collect()
 
@@ -90,24 +138,27 @@ class PageCache:
         Returns:
             Dictionary with hit/miss counts and hit rate
         """
-        total = self.hits + self.misses
-        hit_rate = (self.hits / total * 100) if total > 0 else 0
+        with self._lock:
+            total = self.hits + self.misses
+            hit_rate = (self.hits / total * 100) if total > 0 else 0
 
-        return {
-            'hits': self.hits,
-            'misses': self.misses,
-            'total_requests': total,
-            'hit_rate': hit_rate,
-            'cache_size': len(self.cache),
-            'max_size': self.max_size
-        }
+            return {
+                'hits': self.hits,
+                'misses': self.misses,
+                'total_requests': total,
+                'hit_rate': hit_rate,
+                'cache_size': len(self.cache),
+                'max_size': self.max_size
+            }
 
     def reset_stats(self):
         """Reset hit/miss statistics"""
-        self.hits = 0
-        self.misses = 0
+        with self._lock:
+            self.hits = 0
+            self.misses = 0
         self.logger.debug("Cache statistics reset")
 
     def __len__(self) -> int:
         """Get current cache size"""
-        return len(self.cache)
+        with self._lock:
+            return len(self.cache)

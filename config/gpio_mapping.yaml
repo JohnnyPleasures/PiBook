@@ -1,19 +1,9 @@
-# GPIO Button Configuration
-# Pin numbering uses BCM (Broadcom) mode
-# These pins work identically on Pi 3B+ and Pi Zero 2 W (both have 40-pin headers)
-
 buttons:
   toggle:
-    pin: 5                    # BCM GPIO 5
-    pull: "up"                # Internal pull-up resistor
-    bounce_time: 0.2          # 200ms debounce time
-
-# Button wiring:
-# Connect one side of the button to GPIO 5
-# Connect the other side to GND
-# The pull-up resistor keeps the pin HIGH, button press pulls it LOW
-
-# Button functionality:
-# - On library screen: Opens selected book
-# - On reader screen: Returns to library
-# Same behavior as PiSugar2 long press
+    pin: 5
+    pull: up
+    bounce_time: 0.05
+  back:
+    pin: 6
+    pull: up
+    bounce_time: 0.05
